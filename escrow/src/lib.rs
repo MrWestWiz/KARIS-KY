@@ -464,6 +464,10 @@ pub enum EscrowError {
     /// A multisig-gated entrypoint received a signer address that is not a member of the
     /// configured [`MultisigPolicy::signers`], or the same signer listed more than once.
     MultisigSignerNotAuthorized = 180,
+
+    /// [`LiquifactEscrow::init`] or [`LiquifactEscrow::set_legal_hold_guardian`] received a guardian address
+    /// that is identical to the current admin. Guardian must be distinct from admin.
+    LegalHoldGuardianSameAsAdmin = 213,
 }
 
 #[inline(always)]
@@ -523,6 +527,13 @@ pub enum DataKey {
     /// Configured minimum delay between [`LiquifactEscrow::request_clear_legal_hold`] and
     /// [`LiquifactEscrow::set_legal_hold(env, false)`]. Absent ⇒ `0`.
     LegalHoldClearDelay,
+    /// Optional guardian address distinct from admin, authorized to propose legal holds.
+    /// Absent ⇒ no guardian configured. Set at [`LiquifactEscrow::init`] with optional parameter.
+    /// Must be validated to differ from [`InvoiceEscrow::admin`] at configuration time (error 213).
+    LegalHoldGuardian,
+    /// Proposed legal hold state awaiting guardian confirmation via [`LiquifactEscrow::confirm_legal_hold`].
+    /// Stores the reason string. Absent ⇒ no pending proposal.
+    PendingLegalHoldProposal,
     /// Optional SME collateral commitment metadata (record-only — not an on-chain asset lock).
     /// Absent when no commitment has been recorded. Replaceable by the SME.
     SmeCollateralPledge,
@@ -1944,6 +1955,7 @@ impl LiquifactEscrow {
         settlement_notifier_contract: Option<Address>,
         kyc_provider_contract: Option<Address>,
         admin_roles: Option<Vec<(Address, AdminRole)>>,
+        legal_hold_guardian: Option<Address>,
     ) -> InvoiceEscrow {
         admin.require_auth();
 
@@ -1958,6 +1970,18 @@ impl LiquifactEscrow {
             !env.storage().instance().has(&DataKey::Escrow),
             EscrowError::EscrowAlreadyInitialized,
         );
+
+        // Validate guardian distinctness from admin at config time (error 213)
+        if let Some(ref guardian) = legal_hold_guardian {
+            ensure(
+                &env,
+                guardian != &admin,
+                EscrowError::LegalHoldGuardianSameAsAdmin,
+            );
+            env.storage()
+                .instance()
+                .set(&DataKey::LegalHoldGuardian, guardian);
+        }
 
         // Validate funding deadline
         if let Some(deadline) = funding_deadline {
@@ -4260,6 +4284,86 @@ impl LiquifactEscrow {
     /// Convenience alias for [`LiquifactEscrow::set_legal_hold`] with `active = false`.
     pub fn clear_legal_hold(env: Env) {
         Self::set_legal_hold(env, false, String::from_str(&env, ""));
+    }
+
+    /// Propose a legal hold. If a guardian is configured, only the guardian can call this.
+    /// If no guardian is configured, only the admin can call this.
+    ///
+    /// This stores a pending legal hold proposal with the given reason. The hold does not
+    /// become active until [`LiquifactEscrow::confirm_legal_hold`] is called.
+    ///
+    /// # Authorization
+    ///
+    /// - If `DataKey::LegalHoldGuardian` is set: **guardian must authorize** (via `Address::require_auth()`).
+    /// - If `DataKey::LegalHoldGuardian` is absent: **admin must authorize**.
+    ///
+    /// # Errors
+    ///
+    /// | Condition | Typed error |
+    /// |-----------|-------------|
+    /// | Escrow not initialized | [`EscrowError::EscrowNotInitialized`] |
+    /// | Caller not authorized | Panics via `require_auth()` |
+    pub fn propose_legal_hold(env: Env, reason: String) {
+        // Load escrow to ensure it's initialized and get admin for fallback auth
+        let escrow: InvoiceEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow)
+            .unwrap_or_else(|| fail(&env, EscrowError::EscrowNotInitialized));
+
+        // Determine who is authorized to propose: guardian if set, otherwise admin
+        let guardian_opt: Option<Address> = env.storage()
+            .instance()
+            .get(&DataKey::LegalHoldGuardian);
+
+        if let Some(guardian) = guardian_opt {
+            // Guardian is set; only guardian can propose
+            guardian.require_auth();
+        } else {
+            // No guardian; only admin can propose
+            escrow.admin.require_auth();
+        }
+
+        // Store the pending proposal
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingLegalHoldProposal, &reason);
+    }
+
+    /// Confirm a legal hold proposal. If a guardian is configured, only the admin can call this.
+    /// If no guardian is configured, this is a no-op (since the proposal already came from admin).
+    ///
+    /// This activates the legal hold from a pending proposal state.
+    ///
+    /// # Authorization
+    ///
+    /// - If `DataKey::LegalHoldGuardian` is set: **admin must authorize** (via `Address::require_auth()`).
+    /// - If `DataKey::LegalHoldGuardian` is absent: **admin must authorize** (same as `propose_legal_hold`).
+    ///
+    /// # Errors
+    ///
+    /// | Condition | Typed error |
+    /// |-----------|-------------|
+    /// | Escrow not initialized | [`EscrowError::EscrowNotInitialized`] |
+    /// | No pending proposal | Implementation-defined (proposal may be absent) |
+    /// | Caller not authorized | Panics via `require_auth()` |
+    pub fn confirm_legal_hold(env: Env) {
+        // Load escrow to ensure it's initialized
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        // Retrieve the pending proposal reason
+        let reason: String = env.storage()
+            .instance()
+            .get(&DataKey::PendingLegalHoldProposal)
+            .unwrap_or_else(|| String::from_str(&env, ""));
+
+        // Clear the pending proposal
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingLegalHoldProposal);
+
+        // Activate the legal hold using the existing set_legal_hold logic
+        Self::set_legal_hold(env, true, reason);
     }
 
     pub fn update_funding_target(env: Env, new_target: i128) -> InvoiceEscrow {

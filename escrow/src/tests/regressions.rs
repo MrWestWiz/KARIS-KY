@@ -80,6 +80,7 @@ fn test_regression_201_yield_overflow() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     let investor = Address::generate(&env);
@@ -185,6 +186,7 @@ fn test_regression_204_claim_before_lock() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     let lock_secs = 500u64;
@@ -235,6 +237,7 @@ fn test_regression_205_allowlist_bypass() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     // Enable allowlist but do NOT add the investor
@@ -274,6 +277,7 @@ fn test_regression_206_dust_sweep_zero_funded() {
         &token.id,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,
@@ -334,6 +338,7 @@ fn test_regression_207_funding_deadline_edge() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     // Set timestamp to exact deadline
@@ -374,6 +379,7 @@ fn test_regression_208_invoice_id_null_byte() {
     client.init(
         &admin, &s, &sme, &1000i128, &500i64, &0u64, &t, &None, &tr, &None, &None, &None, &None,
         &None, &None,
+        &None,
     );
 }
 
@@ -403,6 +409,7 @@ fn test_regression_209_target_below_funded() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,

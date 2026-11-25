@@ -124,6 +124,7 @@ fn test_export_state_captures_funded_snapshot() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     let investor = Address::generate(&env);
@@ -335,6 +336,7 @@ fn test_export_state_requires_admin_auth() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,

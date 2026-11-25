@@ -130,6 +130,7 @@ fn test_fund_batch_enforces_size_limit() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     // Attempt to batch-fund with MAX_FUND_BATCH + 1 entries (should fail).
@@ -167,6 +168,7 @@ fn test_fund_batch_accepts_max_entries() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,
@@ -212,6 +214,7 @@ fn test_attestation_append_enforces_log_capacity() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,
@@ -272,6 +275,7 @@ fn test_dust_sweep_enforces_amount_limit() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     let investor = Address::generate(&env);
@@ -317,6 +321,7 @@ fn test_allowlist_batch_enforces_size_limit() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     // Create a batch with MAX_INVESTOR_ALLOWLIST_BATCH + 1 entries.
@@ -356,6 +361,7 @@ fn test_per_investor_storage_cardinality_bounded_by_cap() {
         &treasury,
         &None,
         &Some(max_investors), // Cap at 10 unique investors.
+        &None,
         &None,
         &None,
         &None,
@@ -414,6 +420,7 @@ fn test_per_investor_storage_no_unbounded_enumeration() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,

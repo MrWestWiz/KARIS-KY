@@ -36,6 +36,7 @@ proptest! {
             &None,
         &None,
         &None,
+        &None,
         );
 
         let before = client.get_escrow().funded_amount;
@@ -79,6 +80,7 @@ proptest! {
             &None,
             &None,
             &None,
+        &None,
         &None,
         &None,
         );
@@ -167,6 +169,7 @@ proptest! {
             &max_unique_investors,
             &None,
             &None,
+        &None,
         &None,
         &None,
         );
@@ -345,6 +348,7 @@ fn prop_status_transitions_open_to_funded_only() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     let initial = client.get_escrow();
@@ -387,6 +391,7 @@ fn prop_status_settle_transition() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     client.fund(&investor, &target);
@@ -418,6 +423,7 @@ fn prop_status_withdraw_transition() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
         &None,
         &None,
         &None,
@@ -471,6 +477,7 @@ fn prop_no_regression_from_funded_status() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     client.fund(&investor, &target);
@@ -504,6 +511,7 @@ fn prop_no_regression_after_withdraw() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
         &None,
         &None,
         &None,
@@ -553,6 +561,7 @@ fn prop_settled_is_terminal_for_settle() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     client.fund(&investor, &target);
@@ -582,6 +591,7 @@ fn prop_withdrawn_is_terminal_for_withdraw() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
         &None,
         &None,
         &None,
@@ -629,6 +639,7 @@ fn prop_status_invariant_all_states_valid_range() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     assert!(client.get_escrow().status == 0);
@@ -664,6 +675,7 @@ fn prop_funded_amount_sum_of_contributions() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
         &None,
         &None,
         &None,
@@ -727,6 +739,7 @@ fn prop_funded_amount_respects_funding_target() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     let fund_amount = target + excess;
@@ -760,6 +773,7 @@ fn prop_funded_amount_non_decreasing_across_multiple_funders() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
         &None,
         &None,
         &None,
@@ -816,6 +830,7 @@ fn prop_funded_amount_equals_contribution_sum_for_funded_escrow() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
         &None,
         &None,
         &None,
@@ -944,6 +959,7 @@ fn fuzz_multi_investor_fund_ordering_snapshot_once_only() {
             &None,
             &None,
             &None,
+        &None,
         &None,
         &None,
         );
@@ -1165,6 +1181,7 @@ fn funded_and_settled_escrow<'a>(
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,

@@ -65,6 +65,7 @@ fn deploy_funded_settled<'a>(
         &None,
         &None,
         &None,
+        &None,
     );
     for (investor, amount) in contributions {
         client.fund(investor, amount);
@@ -304,6 +305,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         let mut prev_funded: i128 = 0;
@@ -345,6 +347,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         let mut running_sum: i128 = 0;
@@ -392,6 +395,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         let mut expected_contribution: i128 = 0;
@@ -435,6 +439,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         let mut rng = Rng64::new(seed);
@@ -497,6 +502,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
         prop_assert_eq!(escrow_init.status, 0);
 
@@ -541,6 +547,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         let after = client.fund(&investor, &contribution);
@@ -576,6 +583,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         // Partially fund (won't reach target)
@@ -620,6 +628,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         // Snapshot must not exist before any funding
@@ -702,6 +711,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         let fund_amount = target + excess;
@@ -755,6 +765,7 @@ proptest! {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         let mut rng = Rng64::new(seed);
@@ -1023,6 +1034,7 @@ proptest! {
             &treasury,
             &Some(tiers),
             &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         // First investor uses commitment (tier yield); rest use base fund()
@@ -1138,6 +1150,7 @@ fn fuzz_funded_amount_equals_contribution_sum_100_cases() {
             &None,
             &treasury,
             &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
         );
 
         let max_each = (target / n as i128).max(1);
@@ -1295,6 +1308,7 @@ fn edge_no_contributions_zero_state() {
         &None,
         &treasury,
         &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
     );
 
     assert_eq!(client.get_escrow().status, 0, "no contributions: status must be 0");
@@ -1326,6 +1340,7 @@ fn edge_exact_target_funding() {
         &None,
         &treasury,
         &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
     );
 
     let after = client.fund(&investor, &target);
@@ -1362,6 +1377,7 @@ fn edge_two_investors_second_crosses_target() {
         &None,
         &treasury,
         &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
     );
 
     let after_a = client.fund(&inv_a, &60_000i128);
@@ -1444,6 +1460,7 @@ fn edge_multi_call_same_investor_accumulates() {
         &None,
         &treasury,
         &None, &None, &None, &None, &None, &None, &None, &None, &None,
+        &None,
     );
 
     client.fund(&investor, &50_000i128);
