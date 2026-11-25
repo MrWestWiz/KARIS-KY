@@ -107,6 +107,14 @@
 //! (including over-funding past target), the target, and ledger timestamp/sequence. **Immutable** once
 //! written; see `docs/escrow-pro-rata.md` for the authoritative pro-rata payout math and rounding rules.
 //! Off-chain share for an investor is `get_contribution(addr) / snapshot.total_principal`.
+//!
+//! ## Batch funding (`fund_batch`)
+//!
+//! [`LiquifactEscrow::fund_batch`] is the **canonical** entrypoint for multi-investor funding in a single
+//! atomic transaction. It is the single public batch interface and must be used for all batch operations
+//! to prevent implementation drift. All invariants from [`LiquifactEscrow::fund`] apply per entry.
+//! To discourage duplication, any alternative batch entrypoint (e.g., `batch_fund`) should be clearly
+//! marked deprecated with a `#[deprecated]` attribute directing callers to `fund_batch`.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -2512,20 +2520,28 @@ impl LiquifactEscrow {
         Self::fund_impl(env, investor, amount, false, committed_lock_secs)
     }
 
-    /// Batch funding entrypoint: record multiple investor principals in a single call.
+    /// **Canonical** batch funding entrypoint: record multiple investor principals in a single call.
+    ///
+    /// This is the **canonical batch funding interface** for multi-investor submissions.
+    /// It is the single public entrypoint for batch operations and prevents duplication and
+    /// implementation drift. All batch funding requests should use this entrypoint.
     ///
     /// Each entry is processed sequentially with per-investor [`Address::require_auth()`].
     /// All existing [`LiquifactEscrow::fund`] invariants (allowlist, caps, min contribution,
     /// overflow guards) are enforced per entry. If an entry fails its invariants,
-    /// the call returns an error without corrupting prior entries.
+    /// the call returns an error without corrupting prior entries (atomic transaction semantics).
     ///
     /// # Parameters
-    /// - `entries`: `Vec<(Address, i128)>` of (investor address, funding amount) tuples.
+    /// - `entries`: `Vec<(Address, i128)>` of `(investor_address, amount)` tuples.
+    ///   Must be non-empty and contain at most [`MAX_FUND_BATCH`] (50) entries.
+    ///
+    /// # Returns
+    /// The updated [`InvoiceEscrow`] after all entries are applied.
     ///
     /// # Errors
-    /// - [`EscrowError::FundingBatchEmpty`] if entries is empty
-    /// - [`EscrowError::FundingBatchTooLarge`] if entries.len() > [`MAX_FUND_BATCH`]
-    /// - Per-entry: all errors from [`LiquifactEscrow::fund`] for that investor/amount pair
+    /// - [`EscrowError::FundingBatchEmpty`] if entries is empty.
+    /// - [`EscrowError::FundingBatchTooLarge`] if entries.len() > [`MAX_FUND_BATCH`].
+    /// - Per-entry: all errors from [`LiquifactEscrow::fund`] for that investor/amount pair.
     ///
     /// # Events
     /// One [`EscrowFunded`] event per entry (identical to single [`LiquifactEscrow::fund`] semantics).

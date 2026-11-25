@@ -294,7 +294,22 @@ export class EscrowClient {
     return this.invoke("fund_with_commitment", [investor, amount, committedLockSecs], source);
   }
 
-  /** Batch fund multiple investors. Auth: per-investor. Max 50 entries. */
+  /**
+   * Canonical batch funding entrypoint: record multiple investor principals in a single call.
+   * 
+   * This is the **canonical** batch funding interface for multi-investor submissions.
+   * All batch funding requests must use this method to prevent implementation drift.
+   * 
+   * @param entries Array of `[investor_address, amount_in_base_units]` tuples.
+   *                 Must be non-empty and contain at most 50 entries.
+   * @param source Optional source address for the transaction.
+   * @returns Updated escrow state after all entries are applied.
+   * @throws EscrowError::FundingBatchEmpty if entries is empty.
+   * @throws EscrowError::FundingBatchTooLarge if entries.length > 50.
+   * @throws Per-entry errors from fund() for validation failures.
+   * 
+   * Auth: Per-investor authorization required for each entry.
+   */
   async fundBatch(
     entries: Array<[string, string]>,
     source?: string,
