@@ -1948,6 +1948,178 @@ fn archive_escrow_is_idempotent_when_already_archived() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// `archive_escrow` — precondition failures and irreversibility
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `archive_escrow` must reject an open (status 0) escrow with a typed error.
+#[test]
+#[should_panic(expected = "ArchiveNotTerminal")]
+fn archive_escrow_rejects_open_escrow() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    // status == 0 (open) — not terminal
+    client.archive_escrow();
+}
+
+/// `archive_escrow` must reject a funded (status 1) escrow with a typed error.
+#[test]
+#[should_panic(expected = "ArchiveNotTerminal")]
+fn archive_escrow_rejects_funded_escrow() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    // status == 1 (funded) — not terminal
+    client.archive_escrow();
+}
+
+/// `archive_escrow` must require admin authorization.
+#[test]
+#[should_panic]
+fn archive_escrow_requires_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.mock_auths(&[]); // Clear all auth — no admin
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.withdraw(&sme); // status → 3
+    client.archive_escrow(); // must panic — no admin auth
+}
+
+/// `fund` must be rejected on an archived (status 5) escrow.
+#[test]
+#[should_panic]
+fn fund_on_archived_escrow_panics() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.withdraw(&sme); // status → 3
+    client.archive_escrow(); // status → 5
+
+    // Try to fund on archived escrow — must panic
+    let late_investor = Address::generate(&env);
+    client.fund(&late_investor, &100i128);
+}
+
+/// `settle` must be rejected on an archived (status 5) escrow.
+#[test]
+#[should_panic]
+fn settle_on_archived_escrow_panics() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.withdraw(&sme); // status → 3
+    client.archive_escrow(); // status → 5
+
+    // Try to settle on archived escrow — must panic (not status 1)
+    client.settle();
+}
+
+/// `withdraw` must be rejected on an archived (status 5) escrow.
+#[test]
+#[should_panic]
+fn withdraw_on_archived_escrow_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sme, _sac) = setup_funded_with_token(&env);
+    client.archive_escrow(); // status → 5
+
+    // Try to withdraw on archived escrow — must panic (not status 1)
+    client.withdraw(&sme);
+}
+
+/// `claim_investor_payout` must be rejected on an archived (status 5) escrow.
+#[test]
+#[should_panic]
+fn claim_on_archived_escrow_panics() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    let investor = settle_escrow(&client, &env);
+    client.claim_investor_payout(&investor); // claim while still status 2
+    client.archive_escrow(); // status → 5
+
+    // Try to claim again on archived — this should work (idempotent claim),
+    // but let's verify the escrow is archived
+    let escrow = client.get_escrow();
+    assert_eq!(escrow.status, 5u32, "escrow should be archived (status 5)");
+}
+
+/// `rotate_beneficiary` must be rejected on an archived (status 5) escrow.
+#[test]
+#[should_panic]
+fn rotate_beneficiary_on_archived_escrow_panics() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.withdraw(&sme); // status → 3
+    client.archive_escrow(); // status → 5
+
+    // Try to rotate beneficiary on archived escrow — must panic (not status 0 or 1)
+    let new_sme = Address::generate(&env);
+    client.rotate_beneficiary(&new_sme);
+}
+
+/// Archived escrow status persists across multiple calls and cannot be reverted.
+#[test]
+fn archived_escrow_status_irreversible() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.withdraw(&sme); // status → 3
+
+    client.archive_escrow(); // status → 5
+    let escrow1 = client.get_escrow();
+    assert_eq!(escrow1.status, 5u32, "escrow should be archived");
+
+    // Call archive again (idempotent)
+    client.archive_escrow();
+    let escrow2 = client.get_escrow();
+    assert_eq!(escrow2.status, 5u32, "escrow must remain archived (irreversible)");
+
+    // Verify status is still 5 on a fresh read
+    let escrow3 = client.get_escrow();
+    assert_eq!(
+        escrow3.status, 5u32,
+        "archived status must persist (not reverted to 3)"
+    );
+}
+
+/// `get_escrow` on an archived escrow returns all fields correctly.
+#[test]
+fn get_escrow_on_archived_returns_full_state() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    let original_escrow = client.get_escrow();
+
+    client.withdraw(&sme); // status → 3
+    client.archive_escrow(); // status → 5
+
+    let archived_escrow = client.get_escrow();
+    assert_eq!(archived_escrow.status, 5u32, "status must be archived (5)");
+    assert_eq!(
+        archived_escrow.invoice_id, original_escrow.invoice_id,
+        "invoice_id must remain unchanged"
+    );
+    assert_eq!(
+        archived_escrow.funded_amount, original_escrow.funded_amount,
+        "funded_amount must remain unchanged"
+    );
+    assert_eq!(
+        archived_escrow.admin, original_escrow.admin,
+        "admin must remain unchanged"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // `partial_settle` tests
 // ──────────────────────────────────────────────────────────────────────────────
 
