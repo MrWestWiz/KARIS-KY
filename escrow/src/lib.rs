@@ -4273,9 +4273,19 @@ impl LiquifactEscrow {
 
         ensure(&env, new_target > 0, EscrowError::TargetNotPositive);
         ensure(&env, escrow.status == 0, EscrowError::TargetUpdateNotOpen);
+
+        // Liability floor: target must remain >= funded_amount - distributed_principal.
+        // In status 0 (open), distributed_principal is always 0, so this reduces to >= funded_amount.
+        // This invariant aligns with the floor used by sweep_terminal_dust in cancelled (status 4) escrows.
+        let distributed: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DistributedPrincipal)
+            .unwrap_or(0);
+        let liability_floor = escrow.funded_amount.saturating_sub(distributed);
         ensure(
             &env,
-            new_target >= escrow.funded_amount,
+            new_target >= liability_floor,
             EscrowError::TargetBelowFundedAmount,
         );
 
