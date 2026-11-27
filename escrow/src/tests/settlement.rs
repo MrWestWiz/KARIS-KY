@@ -78,6 +78,8 @@ fn setup_funded_with_token<'a>(
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
 
     // Fund to target (accounting only — no real tokens yet).
@@ -325,6 +327,8 @@ fn test_claim_investor_twice_is_idempotent() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -363,6 +367,8 @@ fn test_claim_by_non_investor_panics() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     // Escrow settled but stranger never funded
     let investor = Address::generate(&env);
@@ -388,6 +394,8 @@ fn test_clashing_investors_have_independent_claims() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -480,6 +488,8 @@ fn test_claim_blocked_until_commitment_ledger_time() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     client.fund_with_commitment(&inv, &1_000i128, &500u64);
     client.settle();
@@ -505,6 +515,8 @@ fn test_claim_succeeds_after_commitment_and_settle() {
         &tok,
         &None,
         &treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -543,6 +555,8 @@ fn test_claim_gating_exact_timestamp() {
         &tok,
         &None,
         &treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -603,6 +617,8 @@ fn test_claim_gating_with_multiple_investors() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
 
     client.fund_with_commitment(&inv1, &1_000i128, &100u64); // Expiry 1100
@@ -642,6 +658,8 @@ fn test_cost_baseline_settle() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -702,6 +720,8 @@ fn settle_with_maturity_zero_succeeds_immediately() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
 
     assert!(
@@ -741,6 +761,8 @@ fn settle_one_second_before_maturity_traps_and_preserves_state() {
         &token,
         &None,
         &treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -797,6 +819,8 @@ fn settle_at_maturity_succeeds() {
         &token,
         &None,
         &treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -1030,6 +1054,8 @@ fn test_sweep_terminal_dust_after_settle_transfers_to_treasury() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     let investor = Address::generate(&env);
     client.fund(&investor, &1_000i128);
@@ -1064,6 +1090,8 @@ fn test_sweep_terminal_dust_after_withdraw_and_ledger_tick() {
         &token.id,
         &None,
         &treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -1111,6 +1139,8 @@ fn test_sweep_rejected_when_open() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -1134,6 +1164,8 @@ fn test_sweep_blocked_under_legal_hold() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -1175,6 +1207,8 @@ fn test_sweep_rejects_amount_above_dust_cap() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     client.fund(&investor, &1_000i128);
     // status == 1 (funded), not settled — must panic
@@ -1199,6 +1233,8 @@ fn test_sweep_caps_at_contract_balance() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -1242,6 +1278,8 @@ fn test_sweep_requires_treasury_auth() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     fund_to_target(&client, &env);
     client.settle();
@@ -1276,6 +1314,8 @@ fn claim_investor_payout_succeeds_after_settle() {
         &token.id,
         &None,
         &treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -1626,6 +1666,8 @@ fn test_is_investor_claimed_false_before_any_claim() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -1658,6 +1700,8 @@ fn test_is_investor_claimed_returns_false_for_unfunded_address() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     client.fund(&investor, &1_000i128);
     client.settle();
@@ -1680,6 +1724,8 @@ fn test_claim_marker_persists_after_claim() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -1721,6 +1767,8 @@ fn test_claim_marker_isolated_per_investor() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     client.fund(&investor_a, &1_000i128);
     client.fund(&investor_b, &1_000i128);
@@ -1749,6 +1797,8 @@ fn test_claim_marker_all_investors_independent() {
         &Address::generate(&env),
         &None,
         &Address::generate(&env),
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -2371,6 +2421,8 @@ fn partial_settlement_respects_maturity() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
 
     // Fund the escrow
@@ -2515,6 +2567,8 @@ fn reinvest_yield_allows_rollover_into_funding_target() {
         &token.id,
         &None,
         &source_treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,

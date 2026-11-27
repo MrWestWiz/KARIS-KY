@@ -48,6 +48,7 @@ fn setup_yield_distribution_test(
         &None,
         &None,
         &None,
+        &None,
     );
 
     // Enable auto-distribution if requested
@@ -147,6 +148,7 @@ fn settlement_with_auto_dist_enabled_creates_snapshot() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     // Enable auto-distribution BEFORE settlement
@@ -193,6 +195,7 @@ fn claim_with_auto_dist_enabled_emits_event() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     client.enable_yield_auto_distribution();
@@ -226,6 +229,7 @@ fn claim_with_auto_dist_disabled_uses_on_demand() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,
@@ -272,6 +276,7 @@ fn auto_dist_claim_is_idempotent() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     client.enable_yield_auto_distribution();
@@ -311,6 +316,7 @@ fn multi_investor_auto_dist_all_claim() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,
@@ -371,6 +377,7 @@ fn default_escrow_has_auto_dist_disabled() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     // Auto-distribution should be disabled by default
@@ -399,6 +406,7 @@ fn auto_dist_feature_backward_compatible() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,
@@ -448,6 +456,7 @@ fn enable_auto_dist_requires_admin() {
         &None,
         &None,
         &None,
+        &None,
     );
 
     // Try to enable as non-admin
@@ -476,6 +485,7 @@ fn disable_auto_dist_requires_admin() {
         &token,
         &None,
         &treasury,
+        &None,
         &None,
         &None,
         &None,
