@@ -8,7 +8,17 @@
 
 ---
 
-## Deprecation Policy
+## ⚠ Critical: Maturity Checks Use Ledger Timestamp
+
+**All settlement operations (`settle()` and `partial_settle()`) use the **validator-observed ledger timestamp** 
+(`env.ledger().timestamp()`) to enforce maturity gates, NOT wall-clock time.** This is essential for 
+off-chain tooling and operator dashboards that monitor settlement eligibility. See 
+[Escrow Lifecycle — Maturity Gate](escrow-lifecycle.md#ledger-timestamp-basis-critical-for-operators) 
+for complete details, boundary examples, and implications for operators integrating external systems.
+
+---
+
+## Quick Comparison: `fund` vs. `fund_with_commitment`
 
 ### Canonical Entrypoint
 - **Name:** `fund_batch`
