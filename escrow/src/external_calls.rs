@@ -67,7 +67,24 @@
 //! post-call accounting invariants at the external-call boundary where token behavior is observed.
 
 use crate::{ensure, fail, EscrowError};
-use soroban_sdk::{token::TokenClient, Address, Env, MuxedAddress};
+use soroban_sdk::{token::TokenClient, Address, Env, MuxedAddress, Symbol};
+
+/// Attempt to register this escrow with the configured registry.
+///
+/// Registry integration is deliberately best-effort: a missing or failing registry must not
+/// prevent the escrow from continuing its own lifecycle.
+pub fn register_escrow_with_registry(
+    env: &Env,
+    registry: &Address,
+    invoice_id: Symbol,
+    escrow_address: Address,
+) -> bool {
+    let args = soroban_sdk::vec![env, invoice_id, escrow_address];
+    matches!(
+        env.try_invoke_contract::<(), (), _>(registry, &Symbol::new(env, "register_escrow"), args),
+        Ok(Ok(()))
+    )
+}
 
 /// Transfer `amount` of `token_addr` from `from` (typically this escrow contract) to `treasury`,
 /// then verify SEP-41-style conservation: sender decreases and recipient increases by exactly
@@ -83,6 +100,14 @@ use soroban_sdk::{token::TokenClient, Address, Env, MuxedAddress};
 /// - Fee-on-transfer tokens (sender delta > amount)
 /// - Rebasing/malicious tokens (recipient delta != amount)
 /// - Balance manipulation or integration bugs
+/// - Zero-amount transfers that might succeed on non-standard tokens
+///
+/// # Zero-amount short-circuit
+///
+/// A zero-amount transfer is rejected **before invoking the token contract**, ensuring that
+/// even if a non-standard token accepts a zero-amount call without error, it cannot be
+/// mis-recorded as a successful fund movement. This guards against an edge case where balance
+/// deltas might both be zero and pass the downstream checks.
 ///
 /// # Arguments
 ///
@@ -115,7 +140,11 @@ pub fn transfer_funding_token_with_balance_checks(
     treasury: &Address,
     amount: i128,
 ) {
+    // Guard against zero-amount transfers before invoking the token contract.
+    // This prevents a non-standard token from accepting a zero transfer and having
+    // both balance deltas be zero, which would pass the downstream delta checks.
     ensure(env, amount > 0, EscrowError::TransferAmountNotPositive);
+    
     let token = TokenClient::new(env, token_addr);
     let from_before = token.balance(from);
     let treasury_before = token.balance(treasury);
