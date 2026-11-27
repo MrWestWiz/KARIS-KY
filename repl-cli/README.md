@@ -1,298 +1,154 @@
-# karis-ky Escrow REPL CLI Tool
+# KARIS-KY Escrow REPL
 
-Interactive REPL (read-eval-print loop) CLI for inspecting karis-ky escrow contract state without writing test code.
+A minimal interactive command-line interface for read-only escrow diagnostics.
+It delegates contract invocation to the [Stellar CLI](https://developers.stellar.org/docs/tools/stellar-cli).
 
-## Features
+## Requirements
 
-**MVP supported commands:**
-- `get_escrow` — Fetch current escrow state
-- `get_version` — Fetch contract schema version  
-- `is_dispute_paused` — Check if dispute pause is active
-- `get_legal_hold` — Check if legal hold is active
-- `export_state` — Export complete state snapshot for backup or migration
+- Node.js 18 or newer
+- The `stellar` CLI installed and configured for the target network
+- A deployed escrow contract ID
 
-**Output format:** Pretty-printed JSON for easy parsing and display.
+## Start
 
-## Installation
+Set `CONTRACT_ID` and optionally `NETWORK` and `SOURCE`, then start the REPL:
 
-```bash
-cd repl-cli
-cargo build --release
+```sh
+CONTRACT_ID=C... NETWORK=testnet npm start
 ```
 
-Binary: `target/release/escrow-repl`
-
-## Usage
-
-### Demo mode (no contract required)
-
-```bash
-escrow-repl
-```
-
-Runs in **demo mode** with mock data for testing commands.
-
-### Network presets
-
-The `--network` flag selects a predefined RPC endpoint. Supported values:
-
-| Network   | RPC URL                                        |
-|-----------|------------------------------------------------|
-| `testnet` | `https://soroban-testnet.stellar.org`          |
-| `mainnet` | `https://soroban-mainnet.stellar.org`          |
-| `local`   | `http://localhost:8000`                        |
-
-Unknown values print a helpful error listing the valid presets.
-
-### Connect to testnet
-
-```bash
-escrow-repl --network testnet --contract CBXYZ123...
-```
-
-### Connect to mainnet
-
-```bash
-escrow-repl --network mainnet --contract CBXYZ123...
-```
-
-### Connect to local validator
-
-```bash
-escrow-repl --network local --contract CBXYZ123...
-```
-
-### Custom RPC endpoint
-
-`--rpc-url` overrides the endpoint selected by `--network`:
-
-```bash
-escrow-repl --network testnet --rpc-url https://custom-rpc.example.com --contract CBXYZ123...
-```
+`SOURCE` is optional and is only needed when required by the Stellar CLI configuration.
+The diagnostic contract entrypoint itself does not require authorization.
 
 ## Commands
 
-### `get_escrow`
+- `diagnose` invokes `detect_state_inconsistencies` on the configured contract and prints the report returned by the Stellar CLI. Invocation failures are reported to stderr.
+- `help` lists available commands.
+- `quit` or `exit` leaves the REPL.
 
-Fetch the current escrow state.
+The diagnostic is read-only with respect to contract storage; it does not repair
+inconsistencies. The contract may emit its diagnostic event when any inconsistency
+is found.
 
+## Tests
+
+═══════════════════════════════════════════════════════
 ```
-escrow> get_escrow
+
+### `help [command]`
+
+**Purpose**: Display help information for available commands.
+
+**Usage**:
+```
+repl-cli> help
+repl-cli> help check_health
+repl-cli> help get_health
 ```
 
-**Output:**
-```json
+### `fund_with_commitment`
+
+**Purpose**: Test and simulate first-time investor contribution with commitment lock and view selected yield tier.
+
+**Arguments**:
+- `<investor>` - The investor address (Stellar format)
+- `<amount>` - Principal contribution in stroops
+- `<lock_secs>` - Lock duration in seconds
+
+**Usage**:
+```
+repl-cli> fund_with_commitment GDPM3QMXN3APYMYBNPIBMVJHD3FQJSCAEBFHDZZS3MSVVUAOTBMVYF2 50000000 86400
 {
-  "invoice_id": "INV_DEMO_001",
-  "admin": "GADMIN...",
-  "sme_address": "GASME...",
-  "amount": 100000000,
-  "funded_amount": 95000000,
-  "yield_bps": 500,
-  "status": 1,
-  "status_label": "funded",
-  "maturity": 1700000000,
-  "created_at": 1690000000,
-  "updated_at": 1690001000
-}
-```
-
-### `get_version`
-
-Fetch contract schema version and build metadata.
-
-```
-escrow> get_version
-```
-
-**Output:**
-```json
-{
-  "schema_version": 7,
-  "contract_version": "0.1.0",
-  "build_timestamp": "2026-08-29T09:15:05Z"
-}
-```
-
-### `is_dispute_paused`
-
-Check if a dispute pause is currently active (separate from legal hold).
-
-```
-escrow> is_dispute_paused
-```
-
-**Output:**
-```json
-{
-  "is_paused": false,
-  "pause_reason": null,
-  "pause_ticket_id": null,
-  "paused_at": null,
-  "resumes_at": null
-}
-```
-
-### `get_legal_hold`
-
-Check whether a compliance/legal hold is active using the read-only `get_legal_hold_status`
-contract entrypoint.
-
-```
-escrow> get_legal_hold
-```
-
-**Output:**
-```json
-{
-  "legal_hold_status": false
-}
-```
-
-### `export_state`
-
-Export complete escrow state snapshot (includes escrow, legal hold, funding snapshots, attestations, etc.).
-
-Useful for backup, migration, or audit.
-
-```
-escrow> export_state
-escrow> export_state | jq . | less
-```
-
-**Output:**
-```json
-{
-  "schema_version": 7,
-  "escrow": {
-    "invoice_id": "INV_DEMO_001",
-    "admin": "GADMIN...",
-    "sme_address": "GASME...",
-    "amount": 100000000,
-    "funded_amount": 95000000,
-    "yield_bps": 500,
-    "status": 1
+  "status": "success",
+  "investor": "GDPM3QMXN3APYMYBNPIBMVJHD3FQJSCAEBFHDZZS3MSVVUAOTBMVYF2",
+  "amount": 50000000,
+  "lock_secs": 86400,
+  "yield_tier_selected": {
+    "tier_index": 1,
+    "effective_yield_bps": 650
   },
-  "funding_token": "TOKEN...",
-  "treasury": "GTREASURY...",
-  "legal_hold": false,
-  "unique_funder_count": 42,
-  "funding_close_snapshot": {
-    "total_principal": 95000000,
-    "target": 100000000,
-    "closed_at": 1690001000,
-    "closed_ledger": 12345
-  }
+  "claim_not_before": 1700086400
 }
 ```
 
-## Examples
+### `fund-batch`
 
-### Basic inspection
+**Purpose**: Fund multiple investors in a single `fund_batch` contract call from a CSV file. This speeds up batch funding for operators.
 
-```bash
-$ escrow-repl --network testnet --contract CBXYZ123...
+**Arguments**:
+- `<path-to-csv>` - Path to a CSV file containing `(address, amount)` pairs
 
-karis-ky Escrow REPL v1.0
-Type 'help' for command list
+**CSV Format**:
+- One `address,amount` pair per line
+- `amount` is in stroops (integer)
+- Blank lines are ignored
+- Lines starting with `#` are treated as comments and ignored
+- At most 50 entries per call (matching the contract's `MAX_FUND_BATCH`)
 
-escrow> get_escrow
+Example CSV (`investors.csv`):
+```
+# address,amount (stroops)
+GDPM3QMXN3APYMYBNPIBMVJHD3FQJSCAEBFHDZZS3MSVVUAOTBMVYF2,50000000
+GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUV,25000000
+```
+
+**Usage**:
+```
+repl-cli> fund-batch investors.csv
 {
-  "invoice_id": "INV_001",
-  "status": 1,
-  "status_label": "funded",
-  ...
-}
-
-escrow> get_version
-{
-  "schema_version": 7,
-  ...
+  "status": "success",
+  "entries": 2,
+  "total_amount": 75000000
 }
 ```
 
-### Export and process with jq
+### Entrypoint help (`help <entrypoint>`)
 
-```bash
-$ escrow-repl --network testnet --contract CBXYZ123...
-
-escrow> export_state | jq '.escrow | {status, funded_amount, funding_target}'
-{
-  "status": 1,
-  "funded_amount": 95000000,
-  "funding_target": 100000000
-}
-```
-
-### Save snapshot to file
-
-```bash
-escrow> export_state > escrow_snapshot.json
-```
-
-### Check pause status
-
-```bash
-escrow> is_dispute_paused
-{
-  "is_paused": true,
-  "pause_ticket_id": "DISPUTE_123",
-  "paused_at": 1690000000,
-  "resumes_at": 1690003600
-}
-```
-
-## Help
+Every contract entrypoint has help text generated from `sdk-ts/spec.json`
+(description, required auth, arguments with types, and return type).
+`help` with no argument lists all entrypoint names.
 
 ```
-escrow> help
+$ repl-cli help settle
+$ repl-cli help          # list every entrypoint
 ```
 
-Show all available commands and usage examples.
+### Tab completion (`complete <prefix>`)
+
+Entrypoint names complete from the contract spec. `complete <prefix>` prints
+all matching entrypoints (sorted), suitable for wiring into shell completion:
 
 ```
-escrow> help export_state
+$ repl-cli complete fund
+fund
+fund_batch
+fund_with_commitment
 ```
 
-Show detailed help for a specific command.
+### JSON output (`--json`)
 
-## Architecture
+Pass `--json` anywhere on the command line to emit the parsed command as a
+single JSON object instead of human-readable text, for consumption by scripts:
 
-- `main.rs` — REPL loop, command parser, network abstraction
-- MVP implementation with demo mode (mock data)
-- Future: Real Soroban RPC integration via stellar-sdk
-
-## Status
-
-**Current:** MVP with demo mode and command parsing  
-**Next:** Real Soroban RPC integration for live contract inspection
-
-## Limitations
-
-- **Demo mode only:** Commands return mock data until Soroban RPC integration is added
-- **Read-only:** Inspection only; no write operations (state mutations require `soroban contract invoke`)
-- **Single network:** Use `--network` to switch (no persistent profile storage yet)
-
-## Testing
-
-```bash
-cargo test --lib
+```
+$ repl-cli --json fund GABC 100
+{"args":["GABC","100"],"command":"fund","known_entrypoint":true}
 ```
 
-Run unit tests for command parsing and help text generation.
+### RPC retry policy
 
-## Future Enhancements
+Read-only RPC calls are wrapped in `retry_read`: transient failures
+(timeouts, connection resets, 5xx) are retried up to **3 attempts total** with
+exponential backoff starting at **100ms** (100ms, 200ms). Fatal errors are
+returned immediately. Mutating calls are **never** retried, to avoid
+applying a write twice.
 
-1. **Real RPC integration:** Call live contract via Soroban RPC
-2. **Transaction support:** Invoke state-mutating entrypoints (fund, settle, etc.)
-3. **Network profiles:** Persistent network configuration (.escrow-repl.toml)
-4. **Snapshots:** Save and restore local snapshots for debugging
-5. **Event history:** Query recent contract events
-6. **Batch operations:** Multi-command scripts
-7. **Interactive help:** Command completion and context-sensitive tips
+### `quit` / `exit`
 
-## See Also
+**Purpose**: Exit the REPL CLI.
 
-- [FEATURE_220_REPL_DESIGN.md](../FEATURE_220_REPL_DESIGN.md) — Full design specification
-- [docs/escrow-sim-stellar-cli.md](../docs/escrow-sim-stellar-cli.md) — Stellar CLI recipes (reference)
-- [escrow contract](../escrow) — Main contract implementation
+**Usage**:
+```
+repl-cli> quit
+repl-cli> exit
+```

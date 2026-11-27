@@ -9,6 +9,9 @@ This document describes parameters and behavior for both funding entrypoints:
 alongside [Escrow Init Parameters](escrow-init-parameters.md),
 [Escrow Lifecycle](escrow-lifecycle.md), and [ADR-005: Tiered Yield](adr/ADR-005-tiered-yield.md).
 
+For multi-investor deposits, use [`batch_fund`](#batch_fund). The legacy `fund_batch`
+entrypoint remains available for compatibility but is deprecated and delegates to `batch_fund`.
+
 ---
 
 ## Quick Comparison: `fund` vs. `fund_with_commitment`
@@ -43,8 +46,8 @@ pub fn fund(env: Env, investor: Address, amount: i128) -> InvoiceEscrow
 
 1. **Auth required:** `investor.require_auth()` — caller must sign the transaction.
 2. **Preconditions checked (in order):**
-   - Amount must be positive (Code 100: `FundingAmountNotPositive`)
-   - Meets minimum contribution floor if configured (Code 101: `FundingBelowMinContribution`)
+   - Amount must be positive (Code 100: `FundingAmountNotPositive`). Zero amounts are **always** rejected, independent of floor configuration.
+   - Meets minimum contribution floor if configured; floor defaults to 0 when absent (Code 101: `FundingBelowMinContribution`). **Absence-equals-zero semantics:** on older schema versions where `MinContributionFloor` is not set, the floor is treated as 0, allowing any positive amount.
    - Escrow must be Open (status = 0) (Code 103: `EscrowNotOpenForFunding`)
    - Legal hold must not be active (Code 102: `LegalHoldBlocksFunding`)
    - Dispute pause must not be active (Code 165: `DisputePausedBlocksFunding`)
@@ -98,6 +101,18 @@ console.log(`Escrow status: ${escrow.status}`); // 0 = Open, 1 = Funded
 console.log(`Total funded: ${escrow.funded_amount}`);
 ```
 
+## `batch_fund` — Batch Investor Deposits
+
+### Signature
+
+```rust
+pub fn batch_fund(env: Env, contributions: Vec<(Address, i128)>) -> InvoiceEscrow
+```
+
+Each contribution is validated with the same funding rules as `fund` and requires
+authorization from its investor. A successful call emits the per-investor funding events and
+one `BatchFundCompleted` summary event. Batches must contain 1 to 50 entries.
+
 ---
 
 ## `fund_with_commitment` — First-Deposit Tiered Yield
@@ -131,8 +146,8 @@ pub fn fund_with_commitment(
    - Prevents changing an investor's tier after initial leg
 
 3. **Preconditions (same as `fund`):**
-   - Amount must be positive (Code 100: `FundingAmountNotPositive`)
-   - Meets minimum contribution floor if configured (Code 101: `FundingBelowMinContribution`)
+   - Amount must be positive (Code 100: `FundingAmountNotPositive`). Zero amounts are **always** rejected, independent of floor configuration.
+   - Meets minimum contribution floor if configured; floor defaults to 0 when absent (Code 101: `FundingBelowMinContribution`). **Absence-equals-zero semantics:** on older schema versions where `MinContributionFloor` is not set, the floor is treated as 0, allowing any positive amount.
    - Escrow must be Open (status = 0) (Code 103: `EscrowNotOpenForFunding`)
    - Legal hold, dispute pause, deadline, allowlist, sanctions, KYC checks
    - Per-investor contribution cap (Code 106: `InvestorContributionExceedsCap`)
@@ -306,6 +321,53 @@ pub struct YieldTier {
   "yield_tiers": null
 }
 ```
+
+---
+
+## Minimum Contribution Floor — Absence-Equals-Zero Semantics
+
+The `MinContributionFloor` parameter guards against dust contributions and is **immutable** after initialization.
+
+### Key Properties
+
+| Property | Behavior |
+|----------|----------|
+| **Stored as** | `DataKey::MinContributionFloor` (instance storage) |
+| **Default** | When absent (not set at init or on older schema versions), the floor defaults to **0** |
+| **Validation** | If set, must be `> 0`. Zero floors are forbidden at init to avoid semantic ambiguity. |
+| **Mutability** | Not mutable after `init`. Floor is locked in for the escrow's lifetime. |
+| **Enforcement** | Applied to **every** `fund` and `fund_with_commitment` call: `amount >= floor` always. |
+
+### Absence-Equals-Zero Policy (Schema Compatibility)
+
+When reading `MinContributionFloor` during `fund`:
+
+```rust
+let floor: i128 = env.storage()
+    .instance()
+    .get(&DataKey::MinContributionFloor)
+    .unwrap_or(0);  // ← Absence (None) → 0
+```
+
+**Why this matters:**
+
+1. **On schema v2 and earlier:** `MinContributionFloor` key does not exist; read returns `None`, treated as floor = 0.
+2. **On schema v3+:** `MinContributionFloor` is always set (either to a positive value at init, or by default during migration).
+3. **Backward compatibility:** Upgrading from v2 → v3 and beyond: no migration needed. Old instances simply read floor as 0.
+
+### Zero-Amount Rejection (Independent of Floor)
+
+Zero amounts are **always** rejected with Code 100 (`FundingAmountNotPositive`), independent of floor:
+
+```rust
+ensure(&env, amount > 0, EscrowError::FundingAmountNotPositive);  // Always first
+ensure(&env, amount >= floor, EscrowError::FundingBelowMinContribution);  // Always second
+```
+
+This ensures:
+- No race condition between floor updates and concurrent fund calls
+- Zero amounts are never "sneaked through" via floor = 0
+- Explicit semantics: positive amounts are the baseline, floor is an additional guard
 
 ---
 
