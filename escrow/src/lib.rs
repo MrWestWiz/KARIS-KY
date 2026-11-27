@@ -5172,7 +5172,8 @@ impl LiquifactEscrow {
                 now.checked_add(committed_lock_secs)
                     .unwrap_or_else(|| fail(env, EscrowError::InvestorClaimTimeOverflow))
             };
-            // Bound: reject if the claim lock would expire after the escrow maturity.
+            // Bound: reject if the claim lock would extend **past** the escrow maturity.
+            // Boundary is INCLUSIVE: claim_nb == escrow.maturity is allowed (investor can claim at maturity).
             // Only constrained when both committed_lock_secs > 0 and maturity > 0.
             if claim_nb > 0 && escrow.maturity > 0 {
                 ensure(

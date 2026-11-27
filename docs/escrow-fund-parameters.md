@@ -203,6 +203,12 @@ After effective yield is selected, a **claim lock** is computed:
    - `claim_not_before = now + committed_lock_secs` (Unix timestamp)
    - Validated: `claim_not_before <= escrow.maturity` (Code 111: `CommitmentLockExceedsMaturity`)
    - This ensures the lock expires before or at the maturity date
+   - **Boundary is inclusive:** `claim_not_before == escrow.maturity` **is allowed**
+   - Claims become available when both conditions are met:
+     1. Escrow is settled (status = 2)
+     2. Ledger timestamp >= `claim_not_before` (the lock has expired)
+   - If the lock and maturity are equal, the investor can claim their payout at exactly the maturity boundary
+   - Reject with Code 111 only when `claim_not_before > escrow.maturity`
 
 3. **Optional investor lock-in period:**
    - If `InvestorLockInSecs` is configured globally, a separate lock-in is applied
