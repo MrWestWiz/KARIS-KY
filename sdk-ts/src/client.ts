@@ -3,7 +3,7 @@
 // Provides a typed client for invoking the LiquifactEscrow Soroban contract.
 // All numeric values use string representation for i128/u64/i64 precision.
 //
-// Schema version: 6
+// Schema version: 8
 // Interface version: 1
 
 import {
@@ -17,10 +17,23 @@ import {
   type FundingCloseSnapshot,
   type SmeCollateralCommitment,
   type EscrowSummary,
+  type InvestorCapStatus,
+  type InvestorPosition,
+  type InvestorFundingRecord,
+  type EscrowSnapshot,
   type ErrorDiagnostic,
+  type MigrationPreflight,
   type EscrowTemplate,
   type InitParams,
   type SorobanResult,
+  type EscrowEvent,
+  type SorobanEventPage,
+  type EscrowEventSubscriptionOptions,
+  type CheckEscrowHealth,
+  type EscrowHealth,
+  type ContractLimits,
+  type EscrowHealthMetrics,
+  type StateInconsistencyReport,
   SCHEMA_VERSION,
   CONTRACT_INTERFACE_VERSION,
   MAX_INVOICE_ID_STRING_LEN,
@@ -67,6 +80,35 @@ export interface EscrowClientConfig {
   specUrl?: string;
 }
 
+/** Raised when an SDK method receives an invalid argument. */
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ValidationError";
+  }
+}
+
+function assertValidInvoiceId(invoiceId: string): void {
+  if (typeof invoiceId !== "string") {
+    throw new ValidationError(
+      `invoice_id must be a string of 1..=${MAX_INVOICE_ID_STRING_LEN} ASCII characters [A-Za-z0-9_]`,
+    );
+  }
+
+  const utf8ByteLength = new TextEncoder().encode(invoiceId).length;
+  if (invoiceId.length === 0 || utf8ByteLength > MAX_INVOICE_ID_STRING_LEN) {
+    throw new ValidationError(
+      `invoice_id must be 1..=${MAX_INVOICE_ID_STRING_LEN} ASCII characters [A-Za-z0-9_] and cannot exceed ${MAX_INVOICE_ID_STRING_LEN} bytes`,
+    );
+  }
+
+  if (!/^[A-Za-z0-9_]+$/.test(invoiceId)) {
+    throw new ValidationError(
+      `invoice_id must use only ASCII letters, digits, and underscores; received: ${invoiceId}`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SorobanClient (lightweight wrapper interface)
 // ---------------------------------------------------------------------------
@@ -82,6 +124,19 @@ export interface SorobanRpcClient {
   simulate(contractId: string, functionName: string, args: unknown[]): Promise<unknown>;
   /** Fetch the current ledger info (timestamp, sequence). */
   getLedger(): Promise<{ timestamp: number; sequence: number }>;
+  /** Fetch contract events using Soroban RPC getEvents semantics. */
+  getEvents?(filter: SorobanEventFilter, options: SorobanEventQuery): Promise<SorobanEventPage>;
+}
+
+export interface SorobanEventFilter {
+  type: "contract";
+  contractIds: string[];
+}
+
+export interface SorobanEventQuery {
+  startLedger?: number;
+  cursor?: string;
+  limit?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +211,74 @@ export class EscrowClient {
     return this._networkPassphrase;
   }
 
+  // ---- Event streaming ----
+
+  /**
+   * Stream escrow lifecycle events by polling Soroban RPC getEvents.
+   * The adapter owns XDR decoding; this method handles filtering, paging, and cancellation.
+   */
+  async *subscribeEscrowEvents(
+    options: EscrowEventSubscriptionOptions = {},
+  ): AsyncGenerator<EscrowEvent, void, undefined> {
+    if (!this.rpc.getEvents) {
+      throw new Error("The configured Soroban RPC client does not support getEvents");
+    }
+
+    const pollInterval = options.poll_interval_ms ?? 5_000;
+    const limit = options.limit ?? 100;
+    if (pollInterval < 0 || !Number.isFinite(pollInterval)) {
+      throw new Error("poll_interval_ms must be a finite, non-negative number");
+    }
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new Error("limit must be a positive integer");
+    }
+
+    let startLedger = options.start_ledger;
+    let cursor = options.cursor;
+    const eventNames = options.event_names ? new Set(options.event_names) : null;
+    const filter: SorobanEventFilter = { type: "contract", contractIds: [this.contractId] };
+
+    if (startLedger === undefined && cursor === undefined) {
+      startLedger = (await this.rpc.getLedger()).sequence;
+    }
+
+    while (!options.signal?.aborted) {
+      const query: SorobanEventQuery = { limit };
+      if (cursor !== undefined) {
+        query.cursor = cursor;
+      } else if (startLedger !== undefined) {
+        query.startLedger = startLedger;
+      }
+      const page = await this.rpc.getEvents(filter, query);
+      if (options.signal?.aborted) {
+        return;
+      }
+      const events = eventNames
+        ? page.events.filter((event) => event.name !== undefined && eventNames.has(event.name))
+        : page.events;
+
+      for (const event of events) {
+        yield event;
+      }
+
+      if (page.cursor) {
+        cursor = page.cursor;
+      } else {
+        cursor = undefined;
+        const lastLedger = page.events.at(-1)?.ledger;
+        if (lastLedger !== undefined) {
+          startLedger = lastLedger + 1;
+        } else if (page.latest_ledger !== undefined) {
+          startLedger = page.latest_ledger + 1;
+        }
+      }
+
+      if (page.events.length === 0) {
+        await waitForEventPoll(pollInterval, options.signal);
+      }
+    }
+  }
+
   // ---- Read-only entrypoints ----
 
   async getEscrow(): Promise<InvoiceEscrow> {
@@ -190,8 +313,24 @@ export class EscrowClient {
     return this.simulate("get_legal_hold", []);
   }
 
+  async getLegalHoldStatus(): Promise<boolean> {
+    return this.simulate("get_legal_hold_status", []);
+  }
+
+  async isDisputePauseActive(): Promise<boolean> {
+    return this.simulate("is_dispute_pause_active", []);
+  }
+
   async getContribution(investor: string): Promise<string> {
     return this.simulate("get_contribution", [investor]);
+  }
+
+  async computeInvestorPayout(investor: string): Promise<string> {
+    return this.simulate("compute_investor_payout", [investor]);
+  }
+
+  async getDistributedPrincipal(): Promise<string> {
+    return this.simulate("get_distributed_principal", []);
   }
 
   async getUniqueFunderCount(): Promise<number> {
@@ -218,6 +357,18 @@ export class EscrowClient {
     return this.simulate("is_investor_refunded", [investor]);
   }
 
+  async getInvestorHistory(investor: string): Promise<InvestorFundingRecord[]> {
+    return this.simulate("get_investor_history", [investor]);
+  }
+
+  async getInvestorHistoryPage(
+    investor: string,
+    offset: number,
+    limit: number,
+  ): Promise<InvestorFundingRecord[]> {
+    return this.simulate("get_investor_history_page", [investor, offset, limit]);
+  }
+
   async getMinContributionFloor(): Promise<string> {
     return this.simulate("get_min_contribution_floor", []);
   }
@@ -234,6 +385,16 @@ export class EscrowClient {
     return this.simulate("get_escrow_summary", []);
   }
 
+  /** Export the full escrow snapshot for disaster recovery or migration. */
+  async exportState(): Promise<EscrowSnapshot> {
+    return this.simulate("export_state", []);
+  }
+
+  /** Import a previously exported snapshot onto a fresh, uninitialized contract instance. */
+  async importState(snapshot: EscrowSnapshot, source?: string): Promise<void> {
+    return this.invoke("import_state", [snapshot], source);
+  }
+
   async getSmeCollateralCommitment(): Promise<SmeCollateralCommitment | null> {
     return this.simulate("get_sme_collateral_commitment", []);
   }
@@ -246,6 +407,10 @@ export class EscrowClient {
     return this.simulate("get_attestation_append_log", []);
   }
 
+  async getAttestationLog(): Promise<string[]> {
+    return this.simulate("get_attestation_log", []);
+  }
+
   async getTemplate(name: string): Promise<EscrowTemplate | null> {
     return this.simulate("get_template", [name]);
   }
@@ -254,10 +419,98 @@ export class EscrowClient {
     return this.simulate("has_maturity_lock", []);
   }
 
+  /**
+   * Perform a quick health check on the escrow.
+   *
+   * Returns a lightweight summary with warning type, funded ratio, and time-to-maturity.
+   * Suitable for dashboard displays and monitoring UIs.
+   *
+   * @returns CheckEscrowHealth with warning_type, funded_ratio_bps, and time_to_maturity_secs.
+   */
+  async checkEscrowHealth(): Promise<CheckEscrowHealth> {
+    return this.simulate("check_escrow_health", []);
+  }
+
+  /**
+   * Get comprehensive escrow health diagnostic information.
+   *
+   * Returns full health details including warning type, funding ratio, maturity timeline,
+   * status labels, and legal hold / maturity lock status. Suitable for detailed health
+   * monitoring dashboards and operator UIs.
+   *
+   * @returns EscrowHealth with all diagnostic fields including warning_type, funded_ratio_bps,
+   *          time_to_maturity_secs, status_label, is_maturity_locked, is_legal_held, and
+   *          unique_funder_count.
+   */
+  async getEscrowHealth(): Promise<EscrowHealth> {
+    return this.simulate("get_escrow_health", []);
+  }
+
+  /**
+   * Get investor capacity status for this escrow.
+   *
+   * Returns a single-call answer to "can more investors contribute?" without requiring
+   * client-side arithmetic on max_unique_investors_cap and unique_funder_count.
+   *
+   * @returns InvestorCapStatus with max, current, remaining, and is_full fields.
+   *          When no cap is set, max is 2^32-1 and is_full is always false.
+   */
+  async getInvestorCapStatus(): Promise<InvestorCapStatus> {
+    return this.simulate("get_investor_cap_status", []);
+  }
+
+  async getInvestorPosition(investor: string): Promise<InvestorPosition> {
+    return this.simulate("get_investor_position", [investor]);
+  }
+
+  /**
+   * Get comprehensive escrow health metrics for dashboard displays.
+   *
+   * Returns operational metrics including funding progress percentage, days to maturity,
+   * unique investor count, average contribution size, and estimated yield payout.
+   * Suitable for monitoring dashboards and analytics.
+   *
+   * @returns EscrowHealthMetrics with funding_progress_percent, days_to_maturity,
+   *          unique_investor_count, average_contribution_size, and estimated_yield_payout.
+   */
+  async getEscrowHealthMetrics(): Promise<EscrowHealthMetrics> {
+    return this.simulate("get_escrow_health_metrics", []);
+  }
+
+  /**
+   * Detect state inconsistencies in the escrow storage.
+   *
+   * Runs a suite of invariant checks on the escrow state without modifying storage.
+   * Returns a report with boolean flags indicating any violations. All false indicates
+   * a valid state; any true flag signals a potential bug or corruption.
+   *
+   * Useful for health monitoring, audits, and debugging.
+   *
+   * @returns StateInconsistencyReport with boolean flags for each invariant violation.
+   */
+  async detectStateInconsistencies(): Promise<StateInconsistencyReport> {
+    return this.simulate("detect_state_inconsistencies", []);
+  }
+
+  /**
+   * Get the operational limits configured for this contract.
+   *
+   * Returns static limits on batch sizes, history entries, and other operational bounds.
+   * Consumers can use these to validate requests before sending (e.g., batch sizes,
+   * attestation append count, investor allowlist mutations).
+   *
+   * @returns ContractLimits with all operational limit constants.
+   */
+  async getLimits(): Promise<ContractLimits> {
+    return this.simulate("get_limits", []);
+  }
+
   // ---- State-mutating entrypoints ----
 
   /** Initialize escrow. One-shot; panics on duplicate. Auth: admin. */
   async init(params: InitParams, source?: string): Promise<InvoiceEscrow> {
+    assertValidInvoiceId(params.invoice_id);
+
     const args = [
       params.admin,
       params.invoice_id,
@@ -274,17 +527,65 @@ export class EscrowClient {
       params.max_per_investor,
       params.legal_hold_clear_delay,
       params.funding_deadline,
+      params.max_funding_rate ?? null,
       params.yield_slippage_threshold,
+      params.settlement_notifier_contract ?? null,
+      params.kyc_provider_contract ?? null,
+      params.admin_roles ?? null,
+      params.reject_contract_admin ?? null,
     ];
     return this.invoke("init", args, source);
   }
 
-  /** Fund escrow. Auth: investor. */
+  /** Initialize escrow with a distinct legal-hold guardian. Auth: admin. */
+  async initWithGuardian(
+    params: InitParams,
+    guardian: string,
+    source?: string,
+  ): Promise<InvoiceEscrow> {
+    assertValidInvoiceId(params.invoice_id);
+
+    const args = [
+      params.admin,
+      guardian,
+      params.invoice_id,
+      params.sme_address,
+      params.amount,
+      params.yield_bps,
+      params.maturity,
+      params.funding_token,
+      params.registry,
+      params.treasury,
+      params.yield_tiers,
+      params.min_contribution,
+      params.max_unique_investors,
+      params.max_per_investor,
+      params.legal_hold_clear_delay,
+      params.funding_deadline,
+      params.max_funding_rate ?? null,
+      params.yield_slippage_threshold,
+      params.settlement_notifier_contract ?? null,
+      params.kyc_provider_contract ?? null,
+      params.admin_roles ?? null,
+      params.reject_contract_admin ?? null,
+    ];
+    return this.invoke("init_with_guardian", args, source);
+  }
+
+  /**
+   * Fund escrow with base yield.
+   * Auth: investor.
+   * See [Fund Parameters Reference](../../../docs/escrow-fund-parameters.md#fund--simple-base-yield-deposit).
+   */
   async fund(investor: string, amount: string, source?: string): Promise<InvoiceEscrow> {
     return this.invoke("fund", [investor, amount], source);
   }
 
-  /** First deposit with tiered yield commitment. Auth: investor. */
+  /**
+   * First deposit with tiered yield commitment (single deposit per investor).
+   * Auth: investor.
+   * See [Fund Parameters Reference](../../../docs/escrow-fund-parameters.md#fund_with_commitment--first-deposit-tiered-yield).
+   */
   async fundWithCommitment(
     investor: string,
     amount: string,
@@ -314,7 +615,7 @@ export class EscrowClient {
     entries: Array<[string, string]>,
     source?: string,
   ): Promise<InvoiceEscrow> {
-    return this.invoke("fund_batch", [entries], source);
+    return this.invoke("batch_fund", [contributions], source);
   }
 
   /** Settle a funded escrow. Auth: sme_address. */
@@ -330,6 +631,37 @@ export class EscrowClient {
   /** Record a payout claim after settlement. Auth: investor. */
   async claimInvestorPayout(investor: string, source?: string): Promise<void> {
     return this.invoke("claim_investor_payout", [investor], source);
+  }
+
+  /** Claim an investor payout as the active delegate. Auth: delegate. */
+  async claimPayoutAsDelegate(
+    investor: string,
+    delegate: string,
+    source?: string,
+  ): Promise<void> {
+    return this.invoke("claim_payout_as_delegate", [investor, delegate], source);
+  }
+
+  /** Set or replace an investor's yield claim delegate. Auth: investor. */
+  async setYieldClaimDelegate(
+    investor: string,
+    delegate: string,
+    source?: string,
+  ): Promise<void> {
+    return this.invoke("set_yield_claim_delegate", [investor, delegate], source);
+  }
+
+  /** Revoke an investor's active yield claim delegate. Auth: investor. */
+  async revokeYieldClaimDelegate(investor: string, source?: string): Promise<void> {
+    return this.invoke("revoke_yield_claim_delegate", [investor], source);
+  }
+
+  /** Record payout claims for multiple investors. Auth: per-investor. */
+  async batchClaimInvestorPayouts(investors: string[], source?: string): Promise<number> {
+    if (investors.length === 0) {
+      throw new Error("investors must not be empty");
+    }
+    return this.invoke("batch_claim_investor_payouts", [investors], source);
   }
 
   /** Cancel funding. Auth: admin. */
@@ -348,8 +680,21 @@ export class EscrowClient {
   }
 
   /** Set or clear legal hold. Auth: admin. */
-  async setLegalHold(active: boolean, source?: string): Promise<void> {
-    return this.invoke("set_legal_hold", [active], source);
+  async setLegalHold(active: boolean, reason: string, source?: string): Promise<void> {
+    if (active && reason.trim().length === 0) {
+      throw new Error("reason must be non-empty when legal hold is activated (active=true)");
+    }
+    return this.invoke("set_legal_hold", [active, reason], source);
+  }
+
+  /** Propose a legal hold for guardian confirmation. Auth: current admin. */
+  async proposeLegalHold(admin: string, source?: string): Promise<void> {
+    return this.invoke("propose_legal_hold", [admin], source);
+  }
+
+  /** Confirm a pending legal hold before its one-hour expiry. Auth: guardian. */
+  async confirmLegalHold(guardian: string, source?: string): Promise<void> {
+    return this.invoke("confirm_legal_hold", [guardian], source);
   }
 
   /** Clear legal hold (convenience wrapper). Auth: admin. */
@@ -387,9 +732,30 @@ export class EscrowClient {
     return this.invoke("accept_admin", [], source);
   }
 
-  /** Migrate schema. Typed errors on all paths in current release. */
-  async migrate(fromVersion: number, source?: string): Promise<void> {
+  /**
+   * Compare the stored schema version with the target before deciding whether to migrate.
+   * A target defaults to this SDK's supported schema version.
+   */
+  async preflightMigration(targetVersion: number = SCHEMA_VERSION): Promise<MigrationPreflight> {
+    const currentVersion = await this.getVersion();
+    const recommendation =
+      currentVersion < targetVersion
+        ? "migration_recommended"
+        : currentVersion === targetVersion
+          ? "already_at_target"
+          : "sdk_behind_contract";
+
+    return { currentVersion, targetVersion, recommendation };
+  }
+
+  /** Migrate schema from the supplied version. Returns the resulting schema version. */
+  async migrate(fromVersion: number, source?: string): Promise<number> {
     return this.invoke("migrate", [fromVersion], source);
+  }
+
+  /** Simulate a schema migration without submitting a transaction. */
+  async dryRunMigrate(fromVersion: number): Promise<number> {
+    return this.simulate("dry_run_migrate", [fromVersion]);
   }
 
   /** Batch set investor allowlist. Auth: admin. Max 32 per call. */
@@ -407,8 +773,11 @@ export class EscrowClient {
     return this.invoke("bind_primary_attestation_hash", [digest], source);
   }
 
-  /** Append to attestation log. Auth: admin. Max 32 entries. */
-  async appendAttestationDigest(digest: string, source?: string): Promise<void> {
+  /** Append a 32-byte digest to the attestation log. Auth: admin. Max 32 entries. */
+  async appendAttestationDigest(digest: Uint8Array, source?: string): Promise<void> {
+    if (!(digest instanceof Uint8Array) || digest.byteLength !== 32) {
+      throw new ValidationError("Attestation digest must be exactly 32 bytes");
+    }
     return this.invoke("append_attestation_digest", [digest], source);
   }
 
@@ -417,7 +786,7 @@ export class EscrowClient {
     return this.invoke("revoke_attestation_digest", [index], source);
   }
 
-  /** Record SME collateral metadata. Auth: sme_address. */
+  /** Record SME collateral metadata. Auth: sme_address. ⚠️ Metadata only — not proof of custody. */
   async recordSmeCollateralCommitment(asset: string, amount: string, source?: string): Promise<void> {
     return this.invoke("record_sme_collateral_commitment", [asset, amount], source);
   }
@@ -444,6 +813,7 @@ export class EscrowClient {
     registry: string | null,
     source?: string,
   ): Promise<InvoiceEscrow> {
+    assertValidInvoiceId(invoiceId);
     return this.invoke("init_from_template", [
       admin, templateName, invoiceId, smeAddress,
       amount, fundingToken, treasury, registry,
@@ -466,4 +836,18 @@ export class EscrowClient {
     const raw = await this.rpc.invoke(this.contractId, fnName, args, source);
     return raw as T;
   }
+}
+
+function waitForEventPoll(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted || delayMs === 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, delayMs);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }

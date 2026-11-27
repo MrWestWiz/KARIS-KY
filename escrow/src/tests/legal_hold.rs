@@ -90,6 +90,42 @@ fn init_open_with_clear_delay(
     (token, treasury)
 }
 
+fn init_open_with_guardian(
+    client: &LiquifactEscrowClient<'_>,
+    env: &Env,
+    admin: &Address,
+    guardian: &Address,
+    sme: &Address,
+    id: &str,
+) {
+    let token = Address::generate(env);
+    let treasury = Address::generate(env);
+    client.init_with_guardian(
+        admin,
+        guardian,
+        &soroban_sdk::String::from_str(env, id),
+        sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &token,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+}
+
 /// Initialise with a real SAC token, fund to target, and mint `TARGET` tokens
 /// into the escrow contract so `withdraw()` can actually transfer them.
 fn init_funded_with_real_token<'a>(
@@ -180,6 +216,33 @@ fn init_settled<'a>(
     (client, escrow_id, token, treasury)
 }
 
+#[test]
+fn legal_hold_status_is_false_when_key_is_unset() {
+    let env = Env::default();
+    let client = super::deploy(&env);
+
+    assert!(!client.get_legal_hold_status());
+}
+
+#[test]
+fn legal_hold_status_is_false_when_hold_is_inactive() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    init_open(&client, &env, &admin, &sme, "LHSTATUS01");
+
+    assert!(!client.get_legal_hold_status());
+}
+
+#[test]
+fn legal_hold_status_is_true_when_hold_is_active() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    init_open(&client, &env, &admin, &sme, "LHSTATUS02");
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
+
+    assert!(client.get_legal_hold_status());
+}
+
 // ── 1. fund ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -189,7 +252,7 @@ fn fund_blocked_under_hold() {
     let (client, admin, sme) = setup(&env);
     let investor = Address::generate(&env);
     init_open(&client, &env, &admin, &sme, "LHF001");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.fund(&investor, &TARGET);
 }
 
@@ -199,7 +262,7 @@ fn fund_passes_when_hold_cleared() {
     let (client, admin, sme) = setup(&env);
     let investor = Address::generate(&env);
     init_open(&client, &env, &admin, &sme, "LHF002");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.clear_legal_hold();
     assert!(!client.get_legal_hold());
     let escrow = client.fund(&investor, &TARGET);
@@ -215,7 +278,7 @@ fn fund_with_commitment_blocked_under_hold() {
     let (client, admin, sme) = setup(&env);
     let investor = Address::generate(&env);
     init_open(&client, &env, &admin, &sme, "LHC001");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.fund_with_commitment(&investor, &TARGET, &0u64);
 }
 
@@ -225,7 +288,7 @@ fn fund_with_commitment_passes_when_hold_cleared() {
     let (client, admin, sme) = setup(&env);
     let investor = Address::generate(&env);
     init_open(&client, &env, &admin, &sme, "LHC002");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.clear_legal_hold();
     let escrow = client.fund_with_commitment(&investor, &TARGET, &0u64);
     assert_eq!(escrow.status, 1);
@@ -240,7 +303,7 @@ fn settle_blocked_under_hold() {
     let (client, admin, sme) = setup(&env);
     let investor = Address::generate(&env);
     init_funded(&client, &env, &admin, &sme, &investor, "LHS001");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.settle();
 }
 
@@ -250,7 +313,7 @@ fn settle_passes_when_hold_cleared() {
     let (client, admin, sme) = setup(&env);
     let investor = Address::generate(&env);
     init_funded(&client, &env, &admin, &sme, &investor, "LHS002");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.clear_legal_hold();
     let escrow = client.settle();
     assert_eq!(escrow.status, 2);
@@ -265,7 +328,7 @@ fn withdraw_blocked_under_hold() {
     let (client, admin, sme) = setup(&env);
     let investor = Address::generate(&env);
     init_funded(&client, &env, &admin, &sme, &investor, "LHW001");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.withdraw();
 }
 
@@ -277,7 +340,7 @@ fn withdraw_passes_when_hold_cleared() {
     let sme = Address::generate(&env);
     let investor = Address::generate(&env);
     let (client, _escrow_id) = init_funded_with_real_token(&env, &admin, &sme, &investor, "LHW002");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.clear_legal_hold();
     let escrow = client.withdraw();
     assert_eq!(escrow.status, 3);
@@ -293,7 +356,7 @@ fn claim_investor_payout_blocked_under_hold() {
     let investor = Address::generate(&env);
     init_funded(&client, &env, &admin, &sme, &investor, "LHP001");
     client.settle();
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.claim_investor_payout(&investor);
 }
 
@@ -304,7 +367,7 @@ fn claim_investor_payout_passes_when_hold_cleared() {
     let investor = Address::generate(&env);
     init_funded(&client, &env, &admin, &sme, &investor, "LHP002");
     client.settle();
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.clear_legal_hold();
     client.claim_investor_payout(&investor);
     assert!(client.is_investor_claimed(&investor));
@@ -324,7 +387,7 @@ fn sweep_terminal_dust_blocked_under_hold() {
         init_settled(&env, &admin, &sme, &investor, "LHD001");
     let stellar = StellarAssetClient::new(&env, &token);
     stellar.mint(&escrow_id, &1_000i128);
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.sweep_terminal_dust(&1_000i128);
 }
 
@@ -339,7 +402,7 @@ fn sweep_terminal_dust_passes_when_hold_cleared() {
         init_settled(&env, &admin, &sme, &investor, "LHD002");
     let stellar = StellarAssetClient::new(&env, &token);
     stellar.mint(&escrow_id, &500i128);
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.clear_legal_hold();
     let swept = client.sweep_terminal_dust(&500i128);
     assert_eq!(swept, 500i128);
@@ -353,10 +416,101 @@ fn set_legal_hold_by_admin_succeeds() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open(&client, &env, &admin, &sme, "LHA001");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     assert!(client.get_legal_hold());
-    client.set_legal_hold(&false);
+    client.set_legal_hold(&false, &String::from_str(&env, ""));
     assert!(!client.get_legal_hold());
+}
+
+#[test]
+fn legal_hold_without_guardian_remains_single_step() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    init_open(&client, &env, &admin, &sme, "LHLEGACY01");
+
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
+
+    assert!(client.get_legal_hold());
+    assert_eq!(client.get_escrow().guardian, None);
+}
+
+#[test]
+fn guardian_legal_hold_requires_admin_proposal_and_guardian_confirmation() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let guardian = Address::generate(&env);
+    init_open_with_guardian(&client, &env, &admin, &guardian, &sme, "LHTWOSTEP1");
+
+    client.propose_legal_hold(&admin);
+    assert!(!client.get_legal_hold());
+
+    client.confirm_legal_hold(&guardian);
+    assert!(client.get_legal_hold());
+}
+
+#[test]
+#[should_panic]
+fn guardian_legal_hold_proposal_requires_admin_auth() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let guardian = Address::generate(&env);
+    init_open_with_guardian(&client, &env, &admin, &guardian, &sme, "LHADMINAUTH");
+
+    env.mock_auths(&[]);
+    client.propose_legal_hold(&admin);
+}
+
+#[test]
+#[should_panic]
+fn guardian_legal_hold_confirmation_requires_guardian_auth() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let guardian = Address::generate(&env);
+    init_open_with_guardian(&client, &env, &admin, &guardian, &sme, "LHGUARDAUTH");
+    client.propose_legal_hold(&admin);
+
+    env.mock_auths(&[]);
+    client.confirm_legal_hold(&guardian);
+}
+
+#[test]
+#[should_panic]
+fn guardian_legal_hold_rejects_expired_proposal() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let guardian = Address::generate(&env);
+    init_open_with_guardian(&client, &env, &admin, &guardian, &sme, "LHEXPIRED1");
+
+    client.propose_legal_hold(&admin);
+    let expired_at = env.ledger().timestamp() + LEGAL_HOLD_PROPOSAL_TTL_SECS;
+    env.ledger().set_timestamp(expired_at);
+    client.confirm_legal_hold(&guardian);
+}
+
+#[test]
+#[should_panic]
+fn guardian_legal_hold_cannot_be_activated_through_legacy_setter() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let guardian = Address::generate(&env);
+    init_open_with_guardian(&client, &env, &admin, &guardian, &sme, "LHBYPASS01");
+
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
+}
+
+#[test]
+#[should_panic]
+fn guardian_legal_hold_cannot_be_activated_through_multisig_setter() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let guardian = Address::generate(&env);
+    init_open_with_guardian(&client, &env, &admin, &guardian, &sme, "LHBYPASS02");
+
+    client.set_legal_hold_multisig(
+        &soroban_sdk::Vec::new(&env),
+        &true,
+        &String::from_str(&env, "compliance"),
+    );
 }
 
 #[test]
@@ -365,7 +519,7 @@ fn set_legal_hold_emits_event_with_correct_flag() {
     let (client, admin, sme) = setup(&env);
     init_open(&client, &env, &admin, &sme, "LHA002");
     // set → active=1
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     assert!(
         env.auths().iter().any(|(addr, _)| *addr == admin),
         "admin auth must be recorded for set_legal_hold"
@@ -383,7 +537,7 @@ fn set_legal_hold_by_non_admin_panics() {
     init_open(&client, &env, &admin, &sme, "LHA003");
     // Drop all mock auths so the non-admin call has no authorisation.
     env.mock_auths(&[]);
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
 }
 
 // ── 8. Admin-only: clear_legal_hold ──────────────────────────────────────────
@@ -393,7 +547,7 @@ fn clear_legal_hold_by_admin_succeeds() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open(&client, &env, &admin, &sme, "LHB001");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     assert!(client.get_legal_hold());
     client.clear_legal_hold();
     assert!(!client.get_legal_hold());
@@ -404,10 +558,10 @@ fn request_clear_legal_hold_by_admin_succeeds_with_zero_delay() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open_with_clear_delay(&client, &env, &admin, &sme, "LHR001", Some(0));
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.request_clear_legal_hold();
     assert!(client.get_legal_hold_clearable_at().is_some());
-    client.set_legal_hold(&false);
+    client.set_legal_hold(&false, &String::from_str(&env, ""));
     assert!(!client.get_legal_hold());
 }
 
@@ -417,7 +571,7 @@ fn request_clear_legal_hold_by_non_admin_panics() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open_with_clear_delay(&client, &env, &admin, &sme, "LHR002", Some(0));
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     env.mock_auths(&[]);
     client.request_clear_legal_hold();
 }
@@ -428,9 +582,9 @@ fn set_legal_hold_false_before_clearable_at_panics() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open_with_clear_delay(&client, &env, &admin, &sme, "LHR003", Some(10));
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.request_clear_legal_hold();
-    client.set_legal_hold(&false);
+    client.set_legal_hold(&false, &String::from_str(&env, ""));
 }
 
 #[test]
@@ -438,11 +592,11 @@ fn set_legal_hold_false_after_clearable_at_succeeds() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open_with_clear_delay(&client, &env, &admin, &sme, "LHR004", Some(10));
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.request_clear_legal_hold();
     let now = env.ledger().timestamp();
     env.ledger().set_timestamp(now + 10);
-    client.set_legal_hold(&false);
+    client.set_legal_hold(&false, &String::from_str(&env, ""));
     assert!(!client.get_legal_hold());
 }
 
@@ -452,7 +606,7 @@ fn clear_legal_hold_by_non_admin_panics() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open(&client, &env, &admin, &sme, "LHB002");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     env.mock_auths(&[]);
     client.clear_legal_hold();
 }
@@ -477,12 +631,12 @@ fn hold_set_before_funding_still_blocks_settle_after_funded() {
     let investor = Address::generate(&env);
     init_open(&client, &env, &admin, &sme, "LHX001");
     // Hold is set while escrow is still open.
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     // fund() itself is blocked — clear hold, fund, then re-apply hold.
     client.clear_legal_hold();
     client.fund(&investor, &TARGET);
     assert_eq!(client.get_escrow().status, 1);
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     // settle must still be blocked.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.settle();
@@ -502,13 +656,13 @@ fn hold_can_be_toggled_and_re_blocks_operations() {
     init_funded(&client, &env, &admin, &sme, &investor, "LHX002");
 
     // First toggle: set → clear → settle succeeds.
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.clear_legal_hold();
     let settled = client.settle();
     assert_eq!(settled.status, 2);
 
     // Second toggle: re-set → claim is blocked.
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.claim_investor_payout(&investor);
     }));
@@ -532,7 +686,7 @@ fn hold_persists_after_admin_handover() {
     let investor = Address::generate(&env);
     let new_admin = Address::generate(&env);
     init_funded(&client, &env, &admin, &sme, &investor, "LHX003");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.propose_admin(&new_admin);
     client.accept_admin();
     // Hold is still active after admin handover.
@@ -565,7 +719,7 @@ fn hold_blocks_sweep_before_zero_amount_check() {
     let investor = Address::generate(&env);
     let (client, _escrow_id, _token, _treasury) =
         init_settled(&env, &admin, &sme, &investor, "LHZ001");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     // Zero amount would normally panic "sweep amount must be positive";
     // the hold check must fire first.
     client.sweep_terminal_dust(&0i128);
@@ -578,7 +732,7 @@ fn hold_blocks_settle_before_status_check_on_open_escrow() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open(&client, &env, &admin, &sme, "LHS003");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     // Escrow is open (status 0) — "Escrow must be funded" would fire next,
     // but hold must panic first.
     client.settle();
@@ -591,7 +745,7 @@ fn hold_blocks_withdraw_before_status_check_on_open_escrow() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open(&client, &env, &admin, &sme, "LHW003");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.withdraw();
 }
 
@@ -605,7 +759,7 @@ fn hold_blocks_fund_before_status_check_on_funded_escrow() {
     let (client, admin, sme) = setup(&env);
     let investor = Address::generate(&env);
     init_funded(&client, &env, &admin, &sme, &investor, "LHF003");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     // Escrow is funded (status 1) — "Escrow not open for funding" would fire next,
     // but hold must panic first.
     client.fund(&investor, &1i128);
@@ -618,10 +772,10 @@ fn set_legal_hold_true_when_already_true_is_idempotent() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open(&client, &env, &admin, &sme, "LHI001");
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     assert!(client.get_legal_hold());
     // Second set(true) must not panic.
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     assert!(client.get_legal_hold());
 }
 
@@ -637,17 +791,17 @@ fn clear_legal_hold_when_already_false_is_idempotent() {
     assert!(!client.get_legal_hold());
 }
 
-// ── 13. Non-gated operations are NOT blocked by hold ─────────────────────────
+// ── 13. Recovery controls remain available under hold ────────────────────────
 
-/// `update_maturity`, admin handover, and getters must all work under hold.
+/// Mutations are blocked under hold except explicit recovery controls; getters remain available.
 #[test]
-fn non_risk_operations_not_blocked_by_hold() {
+fn hold_blocks_configuration_but_allows_recovery_and_getters() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
     init_open(&client, &env, &admin, &sme, "LHN002");
 
     // Enable hold.
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     assert!(client.get_legal_hold());
 
     // Getters must still work.
@@ -655,11 +809,13 @@ fn non_risk_operations_not_blocked_by_hold() {
     assert_eq!(escrow.status, 0u32);
     assert!(client.get_legal_hold());
 
-    // `update_maturity` must not be blocked.
-    let updated = client.update_maturity(&9999u64);
-    assert_eq!(updated.maturity, 9999u64);
+    // Ordinary configuration changes must be blocked.
+    assert_contract_error(
+        client.try_update_maturity(&9999u64),
+        EscrowError::LegalHoldBlocksMutation,
+    );
 
-    // Two-step admin handover must not be blocked.
+    // Two-step admin handover remains available as a hold recovery path.
     let new_admin = Address::generate(&env);
     client.propose_admin(&new_admin);
     assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
@@ -682,7 +838,7 @@ fn claim_after_hold_cleared_still_idempotent() {
     client.settle();
 
     // Set and clear hold.
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.clear_legal_hold();
 
     // First claim succeeds.
@@ -707,7 +863,7 @@ fn single_hold_blocks_all_gated_ops() {
         let (client, admin, sme) = setup(&env);
         let investor = Address::generate(&env);
         init_funded(&client, &env, &admin, &sme, &investor, "LHG001");
-        client.set_legal_hold(&true);
+        client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| client.settle()));
         assert!(r.is_err(), "settle must be blocked under hold");
     }
@@ -717,7 +873,7 @@ fn single_hold_blocks_all_gated_ops() {
         let (client, admin, sme) = setup(&env);
         let investor = Address::generate(&env);
         init_funded(&client, &env, &admin, &sme, &investor, "LHG002");
-        client.set_legal_hold(&true);
+        client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| client.withdraw()));
         assert!(r.is_err(), "withdraw must be blocked under hold");
     }
@@ -728,7 +884,7 @@ fn single_hold_blocks_all_gated_ops() {
         let investor = Address::generate(&env);
         init_funded(&client, &env, &admin, &sme, &investor, "LHG003");
         client.settle();
-        client.set_legal_hold(&true);
+        client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.claim_investor_payout(&investor)
         }));
@@ -745,7 +901,7 @@ fn single_hold_blocks_all_gated_ops() {
             init_settled(&env, &admin, &sme, &investor, "LHG004");
         let stellar = StellarAssetClient::new(&env, &token);
         stellar.mint(&escrow_id, &1_000i128);
-        client.set_legal_hold(&true);
+        client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.sweep_terminal_dust(&1_000i128)
         }));

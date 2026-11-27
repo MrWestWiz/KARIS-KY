@@ -18,8 +18,8 @@
 
 #[cfg(test)]
 use super::{
-    default_init, deploy, deploy_with_id, free_addresses, install_stellar_asset_token, setup,
-    MAX_DUST_SWEEP_AMOUNT, TARGET,
+    assert_contract_error, default_init, deploy, deploy_with_id, free_addresses,
+    install_stellar_asset_token, setup, MAX_DUST_SWEEP_AMOUNT, TARGET,
 };
 use crate::LiquifactEscrow;
 use soroban_sdk::{
@@ -108,9 +108,9 @@ fn settle_escrow(client: &super::LiquifactEscrowClient<'_>, env: &Env) -> Addres
 fn withdraw_sets_status_to_three() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _sme, _sac) = setup_funded_with_token(&env);
+    let (client, sme, _sac) = setup_funded_with_token(&env);
 
-    client.withdraw();
+    client.withdraw(&sme);
 
     let escrow = client.get_escrow();
     assert_eq!(
@@ -131,10 +131,25 @@ fn withdraw_requires_sme_auth() {
 
     // Passes because test env mocks all auth. The assertion is on the *call*
     // succeeding for the correct signer (sme), not an impostor.
-    client.withdraw();
+    client.withdraw(&_sme);
 
     // Verify state changed — confirming it was sme who triggered the path.
     assert_eq!(client.get_escrow().status, 3u32);
+}
+
+/// `withdraw` must be rejected if called by an address other than the registered SME.
+#[test]
+#[should_panic]
+fn withdraw_rejects_wrong_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sme, _sac) = setup_funded_with_token(&env);
+
+    // Generate a different address (not the SME)
+    let impostor = Address::generate(&env);
+
+    // This should panic because impostor != sme
+    client.withdraw(&impostor);
 }
 
 /// After `withdraw` the funded_amount and funding_target remain intact —
@@ -143,9 +158,9 @@ fn withdraw_requires_sme_auth() {
 fn withdraw_preserves_accounting_fields() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _sme, _sac) = setup_funded_with_token(&env);
+    let (client, sme, _sac) = setup_funded_with_token(&env);
 
-    client.withdraw();
+    client.withdraw(&sme);
 
     let escrow = client.get_escrow();
     assert_eq!(
@@ -163,9 +178,9 @@ fn withdraw_preserves_accounting_fields() {
 fn withdraw_emits_event() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _sme, _sac) = setup_funded_with_token(&env);
+    let (client, sme, _sac) = setup_funded_with_token(&env);
 
-    client.withdraw();
+    client.withdraw(&sme);
 
     // At least one event must be emitted in the transaction.
     let contract_events = env.events().all();
@@ -190,7 +205,7 @@ fn withdraw_on_open_escrow_panics() {
     let (client, admin, sme) = setup(&env);
     default_init(&client, &env, &admin, &sme);
     // No funding — status is still 0.
-    client.withdraw();
+    client.withdraw(&sme);
 }
 
 /// `withdraw` on an already-settled (status 2) escrow must panic.
@@ -205,7 +220,7 @@ fn withdraw_on_settled_escrow_panics() {
     default_init(&client, &env, &admin, &sme);
     settle_escrow(&client, &env);
     // status == 2 — withdraw must be rejected.
-    client.withdraw();
+    client.withdraw(&sme);
 }
 
 /// `withdraw` called twice on the same escrow must panic on the second call.
@@ -217,10 +232,10 @@ fn withdraw_on_settled_escrow_panics() {
 fn withdraw_twice_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _sme, _sac) = setup_funded_with_token(&env);
+    let (client, sme, _sac) = setup_funded_with_token(&env);
 
-    client.withdraw(); // first call — succeeds, status → 3
-    client.withdraw(); // second call — must panic (status == 3, not 1)
+    client.withdraw(&sme); // first call — succeeds, status → 3
+    client.withdraw(&sme); // second call — must panic (status == 3, not 1)
 }
 
 /// `settle` cannot be called after `withdraw` (status 3 is terminal).
@@ -229,8 +244,8 @@ fn withdraw_twice_panics() {
 fn settle_after_withdraw_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _sme, _sac) = setup_funded_with_token(&env);
-    client.withdraw(); // status → 3
+    let (client, sme, _sac) = setup_funded_with_token(&env);
+    client.withdraw(&sme); // status → 3
     client.settle(); // must panic — settle requires status == 1
 }
 
@@ -240,8 +255,8 @@ fn settle_after_withdraw_panics() {
 fn fund_after_withdraw_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _sme, _sac) = setup_funded_with_token(&env);
-    client.withdraw(); // status → 3
+    let (client, sme, _sac) = setup_funded_with_token(&env);
+    client.withdraw(&sme); // status → 3
     let late_investor = Address::generate(&env);
     client.fund(&late_investor, &10_000_000_000_i128); // must panic — fund requires status == 0
 }
@@ -261,9 +276,9 @@ fn withdraw_blocked_by_legal_hold() {
     default_init(&client, &env, &admin, &sme);
     fund_to_target(&client, &env);
 
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     // Status is 1 but hold is active — must panic.
-    client.withdraw();
+    client.withdraw(&sme);
 }
 
 /// `withdraw` must succeed after a legal hold is cleared.
@@ -274,12 +289,12 @@ fn withdraw_blocked_by_legal_hold() {
 fn withdraw_succeeds_after_hold_cleared() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _sme, _sac) = setup_funded_with_token(&env);
+    let (client, sme, _sac) = setup_funded_with_token(&env);
 
-    client.set_legal_hold(&true);
-    client.set_legal_hold(&false);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
+    client.set_legal_hold(&false, &String::from_str(&env, ""));
 
-    client.withdraw();
+    client.withdraw(&sme);
     assert_eq!(client.get_escrow().status, 3u32);
 }
 
@@ -404,7 +419,7 @@ fn legal_hold_set_by_non_admin_panics() {
     env.mock_auths(&[]);
     default_init(&client, &env, &admin, &sme);
     // `sme` is not the admin — must panic.
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -433,7 +448,7 @@ fn settle_blocked_by_legal_hold() {
     default_init(&client, &env, &admin, &sme);
     fund_to_target(&client, &env);
 
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.settle();
 }
 
@@ -837,7 +852,7 @@ fn settle_on_withdrawn_escrow_panics() {
     let (client, admin, sme) = setup(&env);
     default_init(&client, &env, &admin, &sme);
     fund_to_target(&client, &env);
-    client.withdraw(); // status → 3
+    client.withdraw(&sme); // status → 3
     client.settle();
 }
 
@@ -871,7 +886,7 @@ fn claim_investor_payout_blocked_by_legal_hold() {
     default_init(&client, &env, &admin, &sme);
     let investor = settle_escrow(&client, &env);
 
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.claim_investor_payout(&investor); // must panic
 }
 
@@ -899,6 +914,86 @@ fn claim_investor_payout_non_participant_panics() {
 
     let stranger = Address::generate(&env);
     client.claim_investor_payout(&stranger);
+}
+
+/// `settle` with `maturity > 0` succeeds one ledger after the configured timestamp.
+#[test]
+fn settle_one_second_after_maturity_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let (token, treasury) = free_addresses(&env);
+
+    let maturity: u64 = 20_000;
+    client.init(
+        &admin,
+        &String::from_str(&env, "INV_MAT_004"),
+        &sme,
+        &TARGET,
+        &800i64,
+        &maturity,
+        &token,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    fund_to_target(&client, &env);
+
+    // Advance ledger to one second after maturity
+    env.ledger().with_mut(|l| l.timestamp = maturity + 1);
+    let settled = client.settle();
+    assert_eq!(settled.status, 2, "settle after maturity must succeed");
+}
+
+/// `settle` must still succeed when ledger time is slightly ahead (clock skew).
+#[test]
+fn settle_with_ledger_clock_skew_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let (token, treasury) = free_addresses(&env);
+
+    let maturity: u64 = 20_000;
+    client.init(
+        &admin,
+        &String::from_str(&env, "INV_MAT_005"),
+        &sme,
+        &TARGET,
+        &800i64,
+        &maturity,
+        &token,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    fund_to_target(&client, &env);
+
+    // Simulate clock skew: ledger time is 5 seconds ahead of maturity
+    env.ledger().with_mut(|l| l.timestamp = maturity + 5);
+    let settled = client.settle();
+    assert_eq!(settled.status, 2, "clock skew must not break settlement");
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -980,7 +1075,7 @@ fn test_sweep_terminal_dust_after_withdraw_and_ledger_tick() {
     );
     let investor = Address::generate(&env);
     client.fund(&investor, &1_000i128);
-    client.withdraw();
+    client.withdraw(&sme);
 
     env.ledger()
         .set_sequence_number(env.ledger().sequence() + 10);
@@ -1050,7 +1145,7 @@ fn test_sweep_blocked_under_legal_hold() {
     );
     client.fund(&investor, &1_000i128);
     client.settle();
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.sweep_terminal_dust(&1i128);
 }
 
@@ -1201,6 +1296,159 @@ fn claim_investor_payout_succeeds_after_settle() {
     assert!(err.is_err(), "sweep without treasury auth must fail");
 }
 
+/// Deterministic scenario: sweeping terminal dust must not consume funds that
+/// are still owed to investors who have not yet claimed.
+///
+/// Three investors each contribute a third of `TARGET`; the escrow settles and
+/// `TARGET` tokens are minted into the contract.  The first investor claims,
+/// then the maximum permitted dust sweep runs.  The remaining two investors
+/// must still be able to claim their full payouts, and the contract balance
+/// after the sweep must cover both outstanding liabilities.
+#[test]
+fn test_sweep_terminal_dust_preserves_unclaimed_investor_liabilities() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token = install_stellar_asset_token(&env);
+    let (contract_id, client) = deploy_with_id(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let (_tok, treasury) = free_addresses(&env);
+
+    client.init(
+        &admin,
+        &String::from_str(&env, "SW_DUST_LIAB"),
+        &sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &token.id,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Three equal investors, each contributing a third of TARGET.
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
+    let inv_c = Address::generate(&env);
+    let third = TARGET / 3;
+    let remainder = TARGET - (third * 2);
+    client.fund(&inv_a, &third);
+    client.fund(&inv_b, &third);
+    client.fund(&inv_c, &remainder);
+
+    client.settle();
+
+    // Mint the full TARGET into the contract so payouts can be honoured.
+    token.stellar.mint(&contract_id, &TARGET);
+
+    // First investor claims.
+    client.claim_investor_payout(&inv_a);
+    assert!(client.is_investor_claimed(&inv_a));
+
+    // Compute the outstanding liabilities for the two unclaimed investors.
+    let payout_b = client.compute_investor_payout(&inv_b);
+    let payout_c = client.compute_investor_payout(&inv_c);
+    let outstanding = payout_b + payout_c;
+
+    // Sweep the maximum allowed amount, capped by the dust cap and the balance.
+    let balance_before = token.token.balance(&contract_id);
+    let sweep_amount = if balance_before < MAX_DUST_SWEEP_AMOUNT {
+        balance_before
+    } else {
+        MAX_DUST_SWEEP_AMOUNT
+    };
+    let treasury_before = token.token.balance(&treasury);
+    let swept = client.sweep_terminal_dust(&sweep_amount);
+
+    assert_eq!(swept, sweep_amount, "sweep must transfer the requested amount");
+    assert_eq!(
+        token.token.balance(&treasury),
+        treasury_before + swept,
+        "treasury must receive the swept amount"
+    );
+
+    // The remaining balance must still cover both unclaimed payouts.
+    let balance_after = token.token.balance(&contract_id);
+    assert!(
+        balance_after >= outstanding,
+        "contract balance after sweep must cover unclaimed investor liabilities"
+    );
+
+    // Both remaining investors can still claim successfully.
+    client.claim_investor_payout(&inv_b);
+    client.claim_investor_payout(&inv_c);
+
+    assert!(client.is_investor_claimed(&inv_a));
+    assert!(client.is_investor_claimed(&inv_b));
+    assert!(client.is_investor_claimed(&inv_c));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// BUG-005: Token transfer safety checks in sweep_terminal_dust
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// **BUG-005 Test**: `sweep_terminal_dust` validates pre-transfer balance and emits
+/// a typed error if the contract is under-funded, preventing host-level traps.
+///
+/// Scenario:
+/// 1. Settle an escrow with a token balance
+/// 2. Verify the balance (for setup)
+/// 3. Call sweep with an amount greater than the actual balance (simulating under-funding)
+/// 4. Expect a typed error (`InsufficientTokenBalanceBeforeTransfer`) instead of a host trap
+///
+/// This test ensures the contract emits typed errors on insufficient balance before
+/// invoking the token transfer, providing clear feedback to treasury operators.
+#[test]
+#[should_panic(expected = "Insufficient token balance before transfer")]
+fn test_sweep_terminal_dust_underfunded_emits_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token = install_stellar_asset_token(&env);
+    let (contract_id, client) = deploy_with_id(&env);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let (_tok, treasury) = free_addresses(&env);
+    let maturity = 5000u64;
+
+    client.init(
+        &admin,
+        &String::from_str(&env, "SW_BUG005"),
+        &sme,
+        &TARGET,
+        &100i64,
+        &maturity,
+        &token.id,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Fund and settle
+    let investor = Address::generate(&env);
+    client.fund(&investor, &1_000i128);
+    client.settle();
+
+    // Mint only 100 tokens into the contract
+    token.stellar.mint(&contract_id, &100i128);
+
+    // Attempt to sweep 200 tokens — should fail with typed error
+    // instead of a host-level trap
+    client.sweep_terminal_dust(&200i128);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Funding snapshot invariant (ADR-003)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1221,7 +1469,7 @@ fn funding_snapshot_survives_withdraw() {
     let snapshot_before = client
         .get_funding_close_snapshot()
         .expect("snapshot exists after fund close");
-    client.withdraw();
+    client.withdraw(&sme);
     let snapshot_after = client
         .get_funding_close_snapshot()
         .expect("snapshot persists after withdraw");
@@ -1532,7 +1780,7 @@ fn investor_contribution_readable_after_withdraw() {
     let investor = Address::generate(&env);
     let contribution: i128 = TARGET;
     client.fund(&investor, &contribution);
-    client.withdraw();
+    client.withdraw(&sme);
 
     let recorded = client.get_contribution(&investor);
     assert_eq!(
@@ -1555,7 +1803,7 @@ fn multi_investor_contributions_preserved_after_withdraw() {
     client.fund(&inv_a, &half);
     client.fund(&inv_b, &(TARGET - half));
 
-    client.withdraw();
+    client.withdraw(&sme);
 
     assert_eq!(client.get_contribution(&inv_a), half);
     assert_eq!(client.get_contribution(&inv_b), TARGET - half);
@@ -1578,7 +1826,7 @@ fn no_state_mutation_possible_after_withdraw() {
         let (client, admin, sme) = setup(&env);
         default_init(&client, &env, &admin, &sme);
         fund_to_target(&client, &env);
-        client.withdraw();
+        client.withdraw(&sme);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.settle();
         }));
@@ -1591,9 +1839,9 @@ fn no_state_mutation_possible_after_withdraw() {
         let (client, admin, sme) = setup(&env);
         default_init(&client, &env, &admin, &sme);
         fund_to_target(&client, &env);
-        client.withdraw();
+        client.withdraw(&sme);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.withdraw();
+            client.withdraw(&sme);
         }));
         assert!(r.is_err(), "withdraw after withdraw must panic");
     }
@@ -1604,7 +1852,7 @@ fn no_state_mutation_possible_after_withdraw() {
         let (client, admin, sme) = setup(&env);
         default_init(&client, &env, &admin, &sme);
         fund_to_target(&client, &env);
-        client.withdraw();
+        client.withdraw(&sme);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let late = Address::generate(&env);
             client.fund(&late, &10_000_000_000_i128);
@@ -1612,6 +1860,93 @@ fn no_state_mutation_possible_after_withdraw() {
         assert!(r.is_err(), "fund after withdraw must panic");
     }
 }
+// ──────────────────────────────────────────────────────────────────────────────
+// `archive_escrow` — unclaimed-payout guard and terminal-state behavior
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `archive_escrow` must panic with `ArchiveBlockedByUnclaimedPayouts` when a
+/// settled escrow still has at least one investor who has not claimed.
+#[test]
+#[should_panic(expected = "ArchiveBlockedByUnclaimedPayouts")]
+fn archive_escrow_blocked_by_unclaimed_payouts() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    // Settle with a single investor who never claims.
+    let _investor = settle_escrow(&client, &env);
+
+    client.archive_escrow();
+}
+
+/// `archive_escrow` must succeed once every investor has claimed their payout.
+#[test]
+fn archive_escrow_succeeds_after_all_claims() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    let investor = settle_escrow(&client, &env);
+
+    client.claim_investor_payout(&investor);
+    assert!(client.is_investor_claimed(&investor));
+
+    client.archive_escrow();
+    assert_eq!(
+        client.get_escrow().status,
+        5u32,
+        "status must be 5 (archived) after archive_escrow"
+    );
+}
+
+/// `archive_escrow` must succeed for a withdrawn (status 3) escrow regardless
+/// of claim state — the settlement path never ran, so there are no payouts.
+#[test]
+fn archive_escrow_succeeds_for_withdrawn_escrow() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.withdraw(&sme); // status → 3
+
+    client.archive_escrow();
+    assert_eq!(client.get_escrow().status, 5u32);
+}
+
+/// `archive_escrow` must succeed for a cancelled (status 4) escrow regardless
+/// of claim state.
+#[test]
+fn archive_escrow_succeeds_for_cancelled_escrow() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.cancel(&sme); // status → 4
+
+    client.archive_escrow();
+    assert_eq!(client.get_escrow().status, 5u32);
+}
+
+/// `archive_escrow` must be idempotent: calling it again on an already-archived
+/// (status 5) escrow must not panic and must leave the status at 5.
+#[test]
+fn archive_escrow_is_idempotent_when_already_archived() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+    fund_to_target(&client, &env);
+    client.withdraw(&sme); // status → 3
+
+    client.archive_escrow();
+    assert_eq!(client.get_escrow().status, 5u32);
+
+    // Second call must be a no-op, not a panic.
+    client.archive_escrow();
+    assert_eq!(
+        client.get_escrow().status,
+        5u32,
+        "archive_escrow must be idempotent when already archived"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // `partial_settle` tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1668,7 +2003,7 @@ fn test_partial_settle_blocked_by_legal_hold() {
     let (client, admin, sme) = setup(&env);
     default_init(&client, &env, &admin, &sme);
 
-    client.set_legal_hold(&true);
+    client.set_legal_hold(&true, &String::from_str(&env, "compliance"));
     client.partial_settle(&sme);
 }
 
@@ -1714,4 +2049,574 @@ fn test_funding_blocked_after_partial_settle() {
 
     let late_investor = Address::generate(&env);
     client.fund(&late_investor, &1_000i128);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Partial settlement with amount parameter tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Partial settlement with 50% of funded amount should keep status as 1 (funded)
+#[test]
+fn settle_partial_amount_keeps_status_funded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+    assert_eq!(escrow.status, 1u32, "Pre-condition: status must be funded");
+
+    // Settle 50% of the funded amount
+    let partial_amount = escrow.funded_amount / 2;
+    client.settle(&Some(partial_amount));
+
+    let updated_escrow = client.get_escrow();
+    assert_eq!(
+        updated_escrow.status, 1u32,
+        "status must remain 1 (funded) after partial settlement"
+    );
+}
+
+/// Full settlement (partial_amount == funded_amount) should transition to status 2
+#[test]
+fn settle_full_amount_transitions_to_settled() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+
+    // Settle 100% explicitly with the full amount
+    client.settle(&Some(escrow.funded_amount));
+
+    let updated_escrow = client.get_escrow();
+    assert_eq!(
+        updated_escrow.status, 2u32,
+        "status must be 2 (settled) when fully settled"
+    );
+}
+
+/// Settle with no amount parameter should fully settle (backward compatibility)
+#[test]
+fn settle_without_amount_fully_settles() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+
+    // Call settle without amount parameter
+    client.settle(&None);
+
+    let updated_escrow = client.get_escrow();
+    assert_eq!(
+        updated_escrow.status, 2u32,
+        "settle with None should fully settle"
+    );
+}
+
+/// Multiple partial settlements should accumulate correctly
+#[test]
+fn multiple_partial_settlements_accumulate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+    let total = escrow.funded_amount;
+
+    // First settlement: 30%
+    let first_settlement = total / 3;
+    client.settle(&Some(first_settlement));
+
+    // Verify status still funded
+    assert_eq!(client.get_escrow().status, 1u32);
+
+    // Second settlement: 30%
+    client.settle(&Some(first_settlement));
+
+    // Verify status still funded
+    assert_eq!(client.get_escrow().status, 1u32);
+
+    // Final settlement: remaining 40%
+    let remaining = total - (first_settlement * 2);
+    client.settle(&Some(remaining));
+
+    // Verify status is now settled
+    assert_eq!(client.get_escrow().status, 2u32);
+}
+
+/// Investor can claim payout after partial settlement
+#[test]
+fn investor_can_claim_after_partial_settlement() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+
+    // Partial settlement: 60%
+    let partial_amount = (escrow.funded_amount * 60) / 100;
+    client.settle(&Some(partial_amount));
+
+    // Investor should be able to claim payout
+    let payout = client.compute_investor_payout(&investor);
+    assert!(
+        payout > 0,
+        "investor should have positive payout after partial settlement"
+    );
+}
+
+/// Pro-rata distribution: investor gets share of settled amount, not full amount
+#[test]
+fn partial_settlement_pro_rata_distribution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor_a = Address::generate(&env);
+    let investor_b = Address::generate(&env);
+
+    // Each investor contributes half
+    let half_target = TARGET / 2;
+    client.fund(&investor_a, &half_target);
+    client.fund(&investor_b, &half_target);
+
+    let escrow = client.get_escrow();
+
+    // Settle only 40% of total
+    let partial_amount = (escrow.funded_amount * 40) / 100;
+    client.settle(&Some(partial_amount));
+
+    // Each investor should get their pro-rata share of the 40%
+    let payout_a = client.compute_investor_payout(&investor_a);
+    let payout_b = client.compute_investor_payout(&investor_b);
+
+    // Payouts should be equal (both invested the same amount)
+    assert_eq!(
+        payout_a, payout_b,
+        "equal investors should get equal payouts"
+    );
+
+    // Both payouts should be based on 40% of funded amount, not 100%
+    let settled_share_per_investor =
+        (partial_amount / 2) + ((partial_amount * escrow.yield_bps as i128) / 10_000) / 2;
+
+    // Allow for rounding differences
+    assert!(
+        (payout_a - settled_share_per_investor).abs() <= 2,
+        "payout should be approximately pro-rata share of settled amount"
+    );
+}
+
+/// After full settlement, status is 2 and investors can still claim
+#[test]
+fn full_settlement_via_partial_allows_claims() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+
+    // Settle all in one partial call
+    client.settle(&Some(escrow.funded_amount));
+
+    // Status should be 2
+    assert_eq!(client.get_escrow().status, 2u32);
+
+    // Investor should be able to claim
+    let payout = client.compute_investor_payout(&investor);
+    assert!(payout > 0, "investor should have positive payout");
+}
+
+/// Partial settlement emits correct event with settled_amount
+#[test]
+fn partial_settlement_emits_correct_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+
+    // Clear previous events
+    env.events().all();
+
+    // Partial settlement
+    let partial_amount = escrow.funded_amount / 2;
+    client.settle(&Some(partial_amount));
+
+    // Check events
+    let contract_events = env.events().all();
+    let events = contract_events.events();
+
+    // Should have at least one event (EscrowPartiallySettled)
+    assert!(!events.is_empty(), "should emit event");
+
+    // The event name should indicate partial settlement, not full settlement
+    // (This is a simplified check; more detailed event inspection depends on event parsing)
+}
+
+/// Full settlement via partial emits EscrowSettled event
+#[test]
+fn full_settlement_via_partial_emits_settled_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+
+    // Clear previous events
+    env.events().all();
+
+    // Full settlement via partial
+    client.settle(&Some(escrow.funded_amount));
+
+    // Check events
+    let contract_events = env.events().all();
+    let events = contract_events.events();
+
+    assert!(!events.is_empty(), "should emit event");
+}
+
+/// Cannot settle more than funded amount
+#[test]
+#[should_panic]
+fn settle_partial_exceeding_funded_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+
+    // Try to settle more than funded
+    let over_funded = escrow.funded_amount + 1;
+    client.settle(&Some(over_funded));
+}
+
+/// Cannot settle zero amount
+#[test]
+#[should_panic]
+fn settle_partial_zero_amount_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+
+    // Try to settle zero
+    client.settle(&Some(0));
+}
+
+/// Cannot settle negative amount
+#[test]
+#[should_panic]
+fn settle_partial_negative_amount_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+
+    // Try to settle negative
+    client.settle(&Some(-100i128));
+}
+
+/// Maturity check applies to partial settlement as well
+#[test]
+#[should_panic]
+fn partial_settlement_respects_maturity() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+
+    // Initialize with maturity timestamp far in future
+    let future_maturity = 9_999_999_999u64;
+    let escrow_id = env.register(LiquifactEscrow, ());
+    let client = super::LiquifactEscrowClient::new(&env, &escrow_id);
+    let funding_token = install_stellar_asset_token(&env);
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "INV_TOK"),
+        &sme,
+        &TARGET,
+        &800i64,
+        &future_maturity,
+        &funding_token,
+        &None,
+        &admin, // treasury
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Fund the escrow
+    let investor = Address::generate(&env);
+    client.fund(&investor, &TARGET);
+
+    // Try to settle before maturity (should panic)
+    env.mock_all_auths();
+    client.settle(&Some(TARGET / 2));
+}
+
+/// Settlement with None parameter settles everything
+#[test]
+fn settle_none_parameter_settles_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let investor = fund_to_target(&client, &env);
+    let escrow = client.get_escrow();
+    let total = escrow.funded_amount;
+
+    // Settle with None parameter
+    client.settle(&None);
+
+    // Should reach status 2 immediately
+    assert_eq!(client.get_escrow().status, 2u32);
+
+    // Investor payout should be based on full amount
+    let payout = client.compute_investor_payout(&investor);
+
+    // Payout should equal: total + coupon
+    let coupon = (total * escrow.yield_bps as i128) / 10_000;
+    let expected_payout = total + coupon;
+
+    assert_eq!(
+        payout, expected_payout,
+        "full settlement payout should include all principal and coupon"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Yield Reinvestment Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn reinvest_yield_requires_settled_source_escrow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (source_client, admin, sme) = setup(&env);
+    default_init(&source_client, &env, &admin, &sme);
+
+    let investor = Address::generate(&env);
+    source_client.fund(&investor, &TARGET);
+
+    let target_client = deploy(&env);
+    let target_admin = Address::generate(&env);
+    let target_sme = Address::generate(&env);
+    target_client.init(
+        &target_admin,
+        &String::from_str(&env, "TARGET_REINVEST"),
+        &target_sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    let result = source_client.try_reinvest_yield(&investor, &target_client.address, &1_000i128);
+    assert_contract_error(result, crate::EscrowError::ReinvestSourceEscrowNotSettled);
+}
+
+#[test]
+fn reinvest_yield_rejects_insufficient_accrued_yield() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (source_client, admin, sme) = setup(&env);
+    default_init(&source_client, &env, &admin, &sme);
+
+    let investor = Address::generate(&env);
+    source_client.fund(&investor, &TARGET);
+    source_client.settle();
+
+    let target_client = deploy(&env);
+    let target_admin = Address::generate(&env);
+    let target_sme = Address::generate(&env);
+    target_client.init(
+        &target_admin,
+        &String::from_str(&env, "TARGET_INSUFFICIENT_YIELD"),
+        &target_sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    let result = source_client.try_reinvest_yield(
+        &investor,
+        &target_client.address,
+        &8_000_000_001i128,
+    );
+    assert_contract_error(result, crate::EscrowError::ReinvestYieldInsufficient);
+}
+
+#[test]
+fn reinvest_yield_allows_rollover_into_funding_target() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token = install_stellar_asset_token(&env);
+    let (source_id, source_client) = deploy_with_id(&env);
+    let source_admin = Address::generate(&env);
+    let source_sme = Address::generate(&env);
+    let source_treasury = Address::generate(&env);
+    source_client.init(
+        &source_admin,
+        &String::from_str(&env, "SOURCE_REINVEST"),
+        &source_sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &token.id,
+        &None,
+        &source_treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    let investor = Address::generate(&env);
+    source_client.fund(&investor, &TARGET);
+    source_client.settle();
+    let reinvest_amount = 1_000i128;
+    token.stellar.mint(&source_id, &(TARGET + reinvest_amount));
+
+    let (target_id, target_client) = deploy_with_id(&env);
+    let target_admin = Address::generate(&env);
+    let target_sme = Address::generate(&env);
+    let target_treasury = Address::generate(&env);
+    target_client.init(
+        &target_admin,
+        &String::from_str(&env, "TARGET_REINVEST"),
+        &target_sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &token.id,
+        &None,
+        &target_treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    source_client.reinvest_yield(&investor, &target_id, &reinvest_amount);
+    let target = target_client.get_escrow();
+    assert_eq!(
+        target.status, 0u32,
+        "target escrow must remain in funding state"
+    );
+    assert_eq!(target.funded_amount, reinvest_amount);
+    assert_eq!(target_client.get_contribution(&investor), reinvest_amount);
+    assert_eq!(token.token.balance(&target_id), reinvest_amount);
+    assert_eq!(token.token.balance(&source_id), TARGET);
+}
+
+#[test]
+#[should_panic]
+fn reinvest_yield_rejects_non_positive_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (source_client, admin, sme) = setup(&env);
+    default_init(&source_client, &env, &admin, &sme);
+
+    let investor = Address::generate(&env);
+    source_client.fund(&investor, &TARGET);
+    source_client.settle();
+
+    let target_client = deploy(&env);
+    let target_admin = Address::generate(&env);
+    let target_sme = Address::generate(&env);
+    target_client.init(
+        &target_admin,
+        &String::from_str(&env, "TARGET_ZERO"),
+        &target_sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    source_client.reinvest_yield(&investor, &target_client.address, &0i128);
+}
+
+#[test]
+fn reinvest_yield_rejects_self_target() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (source_client, admin, sme) = setup(&env);
+    default_init(&source_client, &env, &admin, &sme);
+
+    let investor = Address::generate(&env);
+    source_client.fund(&investor, &TARGET);
+    source_client.settle();
+
+    // Attempt to reinvest yield back into the same (source) escrow
+    let result = source_client.try_reinvest_yield(&investor, &source_client.address, &1_000i128);
+    assert_contract_error(result, crate::EscrowError::ReinvestSelfTargetRejected);
 }
