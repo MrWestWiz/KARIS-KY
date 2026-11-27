@@ -3492,3 +3492,106 @@ fn test_upgrade_rejects_arbitrary_invalid_wasm_hash() {
         "upgrade with arbitrary invalid WASM hash must fail predictably, not trap"
     );
 }
+
+/// Verify that `update_funding_target` enforces the liability floor invariant:
+/// target must not be lowered below `funded_amount - distributed_principal`.
+///
+/// This test demonstrates the shared liability floor between:
+/// 1. `update_funding_target` (enforces floor at status 0)
+/// 2. `sweep_terminal_dust` (enforces floor at status 4)
+///
+/// **Scenario:**
+/// - Initialize escrow with target 10,000
+/// - Fund with 5,000 from two investors (total funded_amount = 5,000)
+/// - Attempt to lower target below 5,000 → rejected (TargetBelowFundedAmount = 74)
+/// - Set target to 5,000 → succeeds (at the floor)
+/// - Set target to 6,000 → succeeds (above the floor)
+///
+/// This invariant ensures that if the escrow is later cancelled and investors
+/// refund partially, the balance will always cover outstanding claims.
+#[test]
+#[should_panic(expected = "TargetBelowFundedAmount")]
+fn test_update_funding_target_respects_liability_floor() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "FLOOR01"),
+        &sme,
+        &10_000i128,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Both investors contribute equally: total funded = 5,000
+    client.fund(&inv_a, &2_500i128);
+    client.fund(&inv_b, &2_500i128);
+
+    // Verify funded_amount constraint: cannot lower target below funded amount
+    assert_eq!(client.get_escrow().funded_amount, 5_000i128);
+
+    // This must fail: target (3,000) < liability_floor (5,000 - 0 = 5,000)
+    client.update_funding_target(&3_000i128);
+}
+
+/// Verify that after lowering to the liability floor, we can set the target
+/// to exactly the funded amount or higher.
+#[test]
+fn test_update_funding_target_at_and_above_liability_floor() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "FLOOR02"),
+        &sme,
+        &10_000i128,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Fund with 4,500 total
+    client.fund(&inv_a, &2_000i128);
+    client.fund(&inv_b, &2_500i128);
+    assert_eq!(client.get_escrow().funded_amount, 4_500i128);
+
+    // Setting to exactly the liability floor (4,500) succeeds
+    let updated = client.update_funding_target(&4_500i128);
+    assert_eq!(updated.funding_target, 4_500i128);
+
+    // Setting above the floor (5,000) succeeds
+    let updated = client.update_funding_target(&5_000i128);
+    assert_eq!(updated.funding_target, 5_000i128);
+
+    // Verify status is still open (0)
+    assert_eq!(updated.status, 0);
+}

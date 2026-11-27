@@ -1,536 +1,301 @@
-# Escrow Fund Parameters — Reference Guide
+# Escrow Funding Parameters & Liability Floor Invariant
 
-> **Contract version:** `SCHEMA_VERSION = 8` | `INTERFACE_VERSION = 1`
-> **Target audience:** SDK integrators and operators calling `fund` and `fund_with_commitment`
+> **Contract version:** `SCHEMA_VERSION = 6` | `INTERFACE_VERSION = 1`  
+> **Target audience:** Operators, integrators, protocol developers, and auditors
 
-This document describes parameters and behavior for both funding entrypoints:
-[`fund`](#fund) (simple, base-yield deposits) and
-[`fund_with_commitment`](#fund_with_commitment) (first-deposit tiered yield). Use this
-alongside [Escrow Init Parameters](escrow-init-parameters.md),
-[Escrow Lifecycle](escrow-lifecycle.md), and [ADR-005: Tiered Yield](adr/ADR-005-tiered-yield.md).
-
-For multi-investor deposits, use [`batch_fund`](#batch_fund). The legacy `fund_batch`
-entrypoint remains available for compatibility but is deprecated and delegates to `batch_fund`.
+This document describes the relationship between funding target updates (`update_funding_target`) and 
+dust sweep restrictions (`sweep_terminal_dust`), emphasizing the **shared liability floor invariant** 
+that ensures consistency across both endpoints.
 
 ---
 
-## Quick Comparison: `fund` vs. `fund_with_commitment`
+## Overview: The Funding Target and Dust Sweep Ecosystem
 
-| Aspect | `fund` | `fund_with_commitment` |
-|--------|--------|----------------------|
-| **Callable by** | Any investor (multiple times) | **First deposit only** per investor |
-| **Yield** | Base yield (`escrow.yield_bps`) | Tier-selected yield (if configured) or base |
-| **Lock period** | None; claim immediately at settlement | Optional; `committed_lock_secs` enforced |
-| **Parameters** | `investor`, `amount` | `investor`, `amount`, `committed_lock_secs` |
-| **Use case** | Standard deposits, retail, simple yield | Commitment-based incentives, lock-ups |
-| **Second call** | Allowed (stacks contributions) | **Rejected** with Code 36 (`TieredSecondDeposit`) |
+The escrow contract manages two distinct phases of fund movement:
+
+1. **Funding Phase** (status 0 = open, status 1 = funded): Investors deposit principal; the target may be adjusted.
+2. **Terminal Phase** (status 4 = cancelled): Investors can refund; dust sweeps are gated by outstanding liabilities.
+
+The contract maintains a critical invariant: **the liability floor must remain consistent across both phases**.
 
 ---
 
-## `fund` — Simple Base-Yield Deposit
+## Key Concepts
 
-### Signature
+### Funded Amount (`funded_amount`)
 
-```rust
-pub fn fund(env: Env, investor: Address, amount: i128) -> InvoiceEscrow
+The **cumulative principal** deposited by all investors across all `fund` and `fund_with_commitment` calls.
+Once an investor contributes, the escrow's `funded_amount` increases immediately.
+
+| State | Funded Amount | Mutable? |
+|-------|---------------|----------|
+| Open (0) | Grows as investors fund | Increases only on each deposit |
+| Funded (1) | Fixed at settlement/cancellation time | Immutable from status 1 onward |
+| Cancelled (4) | Same as at cancellation | Immutable |
+
+### Distributed Principal (`distributed_principal`)
+
+The **cumulative principal refunded to investors** via the `refund()` endpoint in a cancelled escrow.
+Only meaningful in status 4 (cancelled) state; remains 0 in settled (2) or withdrawn (3) states.
+
+| Endpoint | Increments `distributed_principal`? |
+|----------|--------------------------------------|
+| `refund()` (status 4 only) | Yes — by investor's contribution |
+| `settle()` (status 2) | No — disbursement is off-chain |
+| `withdraw()` (status 3) | No — disbursement is off-chain |
+| `sweep_terminal_dust()` | No — but reads it to enforce floor |
+
+### Outstanding Investor Liabilities
+
+The amount of funded principal that investors have **not yet received**:
+
+```
+outstanding = funded_amount - distributed_principal
 ```
 
-### Parameters
-
-| Parameter | Type | Constraints | Description |
-|-----------|------|-------------|-------------|
-| `investor` | `Address` | Valid Stellar address | The funding account (must call this function for auth). |
-| `amount` | `i128` | `> 0`, `≤ funding_token` balance | Principal amount in base units. Rejects on overflow. |
-
-### Behavior
-
-1. **Auth required:** `investor.require_auth()` — caller must sign the transaction.
-2. **Preconditions checked (in order):**
-   - Amount must be positive (Code 100: `FundingAmountNotPositive`). Zero amounts are **always** rejected, independent of floor configuration.
-   - Meets minimum contribution floor if configured; floor defaults to 0 when absent (Code 101: `FundingBelowMinContribution`). **Absence-equals-zero semantics:** on older schema versions where `MinContributionFloor` is not set, the floor is treated as 0, allowing any positive amount.
-   - Escrow must be Open (status = 0) (Code 103: `EscrowNotOpenForFunding`)
-   - Legal hold must not be active (Code 102: `LegalHoldBlocksFunding`)
-   - Dispute pause must not be active (Code 165: `DisputePausedBlocksFunding`)
-   - Funding deadline must not have passed (Code 153: `FundingDeadlinePassed`)
-   - Investor must be allowlisted if allowlist is active (Code 104: `InvestorNotAllowlisted`)
-   - Investor must pass sanctions screening (Code 205: `SanctionsScreeningFailed`)
-   - Investor must pass KYC check if registry configured (Code 173: `InvestorNotVerified`)
-
-3. **Contribution tracking:**
-   - New total for investor = `previous_contribution + amount`
-   - Must not exceed per-investor cap if configured (Code 106: `InvestorContributionExceedsCap`)
-
-4. **Unique investor cap:**
-   - If previous contribution was 0, investor is "new" — count increments
-   - If unique investor cap is configured, reject if count would exceed (Code 107: `UniqueInvestorCapReached`)
-
-5. **Yield assignment (first deposit only):**
-   - On first call (`prev == 0`): investor's effective yield = escrow's base `yield_bps`
-   - Stored persistently; used for all future claims
-   - Subsequent calls reuse the same effective yield
-
-6. **Concentration limit:**
-   - If configured, check investor concentration = `(investor_total * 100) / total_funded`
-   - Reject if exceeds configured cap (but no explicit error code — check logs for `ConcentrationLimitExceeded`)
-
-7. **Funding target check:**
-   - New total (`funded_amount + amount`) must not exceed `funding_target`
-   - Overflow in `funded_amount` would cause Code 110: `FundedAmountOverflow`
-
-8. **Status transition:**
-   - If `funded_amount >= funding_target` after deposit, transition to Funded (status = 1)
-   - Single-write immutable snapshot created (`FundingCloseSnapshot`)
-
-9. **Event emission:**
-   - `InvestorFunded` event with amount, contribution total, effective yield, tier lock (0 for simple fund)
-   - If funded → Funded transition, `FundingClosedEvent` emitted
-
-### Return Value
-
-Updated `InvoiceEscrow` struct reflecting new `funded_amount` and possibly new `status`.
-
-### Gas Cost
-
-Typical: 5,000–12,000 CPU units. Higher with tier lookup, caps, and allowlist checks.
-
-### Example (TypeScript SDK)
-
-```typescript
-const escrow = await client.fund(investorAddress, "10000000000"); // 10,000 tokens (7 decimals)
-console.log(`Escrow status: ${escrow.status}`); // 0 = Open, 1 = Funded
-console.log(`Total funded: ${escrow.funded_amount}`);
-```
-
-## `batch_fund` — Batch Investor Deposits
-
-### Signature
-
-```rust
-pub fn batch_fund(env: Env, contributions: Vec<(Address, i128)>) -> InvoiceEscrow
-```
-
-Each contribution is validated with the same funding rules as `fund` and requires
-authorization from its investor. A successful call emits the per-investor funding events and
-one `BatchFundCompleted` summary event. Batches must contain 1 to 50 entries.
+In status 4 (cancelled):
+- If `distributed_principal = 0`, **all** funded amount is outstanding.
+- If `distributed_principal = funded_amount`, **no** outstanding liabilities (all refunds complete).
+- Otherwise, **partial** outstanding liabilities exist.
 
 ---
 
-## `fund_with_commitment` — First-Deposit Tiered Yield
+## The Liability Floor Invariant
 
-### Signature
+### Definition
 
-```rust
-pub fn fund_with_commitment(
-    env: Env,
-    investor: Address,
-    amount: i128,
-    committed_lock_secs: u64,
-) -> InvoiceEscrow
+The contract enforces a single, unified **liability floor** across both funding and terminal phases:
+
+```
+liability_floor = funded_amount - distributed_principal
 ```
 
-### Parameters
+**Invariant:** 
+- `update_funding_target` must reject targets **below** `liability_floor`.
+- `sweep_terminal_dust` must reject sweeps that would reduce balance **below** `liability_floor`.
 
-| Parameter | Type | Constraints | Description |
-|-----------|------|-------------|-------------|
-| `investor` | `Address` | Valid Stellar address | The funding account (must call this function for auth). |
-| `amount` | `i128` | `> 0`, `≤ funding_token` balance | Principal amount in base units. Rejects on overflow. |
-| `committed_lock_secs` | `u64` | Any non-negative value | Lock duration in seconds. `0` means immediate claim eligibility (no lock). |
+### Why This Matters
 
-### Behavior (First-Deposit-Only Discipline)
+If we allowed a target to be set below `liability_floor`, the protocol could inadvertently
+create a scenario where the balance cannot legally cover all outstanding investor claims,
+violating the promise that refunds will always succeed.
 
-1. **Auth required:** `investor.require_auth()` — caller must sign the transaction.
+### Status-Specific Behavior
 
-2. **First-deposit gate (CRITICAL):**
-   - If investor's `previous_contribution > 0`, **immediately reject** with Code 36 (`TieredSecondDeposit`)
-   - This is enforced before any other checks — non-negotiable constraint
-   - Prevents changing an investor's tier after initial leg
+#### Status 0 (Open)
 
-3. **Preconditions (same as `fund`):**
-   - Amount must be positive (Code 100: `FundingAmountNotPositive`). Zero amounts are **always** rejected, independent of floor configuration.
-   - Meets minimum contribution floor if configured; floor defaults to 0 when absent (Code 101: `FundingBelowMinContribution`). **Absence-equals-zero semantics:** on older schema versions where `MinContributionFloor` is not set, the floor is treated as 0, allowing any positive amount.
-   - Escrow must be Open (status = 0) (Code 103: `EscrowNotOpenForFunding`)
-   - Legal hold, dispute pause, deadline, allowlist, sanctions, KYC checks
-   - Per-investor contribution cap (Code 106: `InvestorContributionExceedsCap`)
-   - Unique investor cap (Code 107: `UniqueInvestorCapReached`)
-   - Funding target not exceeded (Code 110: `FundedAmountOverflow` on overflow)
+- `distributed_principal = 0` (always; refunds haven't begun)
+- `liability_floor = funded_amount - 0 = funded_amount`
+- **`update_funding_target` check:** `new_target >= funded_amount`
+- Dust sweep: Not applicable (not terminal)
 
-### Tier Selection Algorithm
+#### Status 1 (Funded)
 
-Called internally as `effective_yield_for_commitment(base_yield, committed_lock_secs)`:
+- `distributed_principal = 0` (always; refunds haven't begun)
+- `liability_floor = funded_amount - 0 = funded_amount`
+- **`update_funding_target`:** Not callable (error `TargetUpdateNotOpen = 73`)
+- Dust sweep: Not applicable (not terminal)
 
-1. **If `committed_lock_secs == 0`:**
-   - Return `(base_yield, 0)` — no lock, use base yield
+#### Status 4 (Cancelled)
 
-2. **If no tier table configured:**
-   - Return `(base_yield, 0)` — no tiers, use base yield
-
-3. **If tier table is empty:**
-   - Return `(base_yield, 0)` — empty table, use base yield
-
-4. **Tier matching (greedy, highest yield wins):**
-   - Iterate over `yield_tiers` in order
-   - For each tier: if `committed_lock_secs >= tier.min_lock_secs` and `tier.yield_bps > current_best`
-   - Update `current_best = tier.yield_bps`
-   - After all tiers scanned, return `(current_best, best_lock)` where `best_lock` is the `min_lock_secs` of the best-matching tier
-
-5. **Example:**
-   ```rust
-   yield_tiers = [
-     { min_lock_secs: 2_592_000,  yield_bps: 1000 },  // 30 days → 10%
-     { min_lock_secs: 7_776_000,  yield_bps: 1200 },  // 90 days → 12%
-     { min_lock_secs: 15_552_000, yield_bps: 1500 }   // 180 days → 15%
-   ]
-   ```
-
-   | Committed lock | Matching tiers | Selected yield | Lock threshold |
-   |---|---|---|---|
-   | 0 seconds | None | base_yield | 0 |
-   | 1_296_000 (15 days) | None | base_yield | 0 |
-   | 2_592_000 (30 days) | [0] | 1000 bps | 2_592_000 |
-   | 5_000_000 (58 days) | [0] | 1000 bps | 2_592_000 |
-   | 7_776_000 (90 days) | [0, 1] | 1200 bps | 7_776_000 |
-   | 15_552_000 (180 days) | [0, 1, 2] | 1500 bps | 15_552_000 |
-   | 30_000_000 (347 days) | [0, 1, 2] | 1500 bps | 15_552_000 |
-
-### Claim Lock Enforcement
-
-After effective yield is selected, a **claim lock** is computed:
-
-1. If `committed_lock_secs == 0`:
-   - `claim_not_before = 0` (no lock)
-
-2. If `committed_lock_secs > 0`:
-   - `claim_not_before = now + committed_lock_secs` (Unix timestamp)
-   - Validated: `claim_not_before <= escrow.maturity` (Code 111: `CommitmentLockExceedsMaturity`)
-   - This ensures the lock expires before or at the maturity date
-   - **Boundary is inclusive:** `claim_not_before == escrow.maturity` **is allowed**
-   - Claims become available when both conditions are met:
-     1. Escrow is settled (status = 2)
-     2. Ledger timestamp >= `claim_not_before` (the lock has expired)
-   - If the lock and maturity are equal, the investor can claim their payout at exactly the maturity boundary
-   - Reject with Code 111 only when `claim_not_before > escrow.maturity`
-
-3. **Optional investor lock-in period:**
-   - If `InvestorLockInSecs` is configured globally, a separate lock-in is applied
-   - `lock_until = now + lock_in_secs`
-
-4. **Claim gate (enforced by `claim_investor_payout`):**
-   - SME cannot settle the escrow until both locks have passed:
-     - `ledger.timestamp() >= claim_not_before` (commitment lock)
-     - `ledger.timestamp() >= lock_in_until` (optional global lock-in)
-
-### Yield and Concentration
-
-Same logic as `fund`:
-
-1. Effective yield is stored persistently for this investor
-2. Concentration cap is checked if configured
-3. If `funded_amount >= funding_target`, transition to Funded and snapshot
-
-### Status Transition and Events
-
-Same as `fund`:
-
-1. If `funded_amount >= funding_target`, escrow transitions to Funded (status = 1)
-2. Emit `InvestorFunded` event with:
-   - Amount
-   - Total investor contribution
-   - Effective yield (selected via tier)
-   - Tier lock (the `min_lock_secs` threshold, or 0 if no tier)
-
-### Return Value
-
-Updated `InvoiceEscrow` struct.
-
-### Gas Cost
-
-Typical: 7,000–15,000 CPU units. Higher with multiple tiers (O(n) scan).
-- Tier lookup: ~500 CPU per tier
-- Lock computation: ~1,000 CPU
-- Keep tier count ≤ 5 for optimal gas
-
-### Example (TypeScript SDK)
-
-```typescript
-// Investor commits to 90-day lock for elevated yield
-const escrow = await client.fundWithCommitment(
-  investorAddress,
-  "10000000000",    // 10,000 tokens
-  "7776000"         // 90 days in seconds
-);
-
-console.log(`Escrow status: ${escrow.status}`); // 0 or 1
-console.log(`Effective yield: ${escrow.investorEffectiveYield} bps`); // e.g., 1200 (12%)
-console.log(`Claim unlock time: ${escrow.investorClaimNotBefore}`); // Unix timestamp
-```
+- `distributed_principal >= 0` (may have partial or full refunds)
+- `liability_floor = funded_amount - distributed_principal` (can be > 0 if refunds incomplete)
+- **`update_funding_target`:** Not callable (error `TargetUpdateNotOpen = 73`)
+- **`sweep_terminal_dust` check:** `balance_after_sweep >= liability_floor` or error `SweepExceedsLiabilityFloor = 42`
 
 ---
 
-## Yield Tier Configuration (Init-Time)
+## Cross-Reference: `update_funding_target` and `sweep_terminal_dust`
 
-Yield tiers are set during [`init`](escrow-init-parameters.md#10-yield_tiers--tiered-yield-ladder-immutable)
-and are **immutable** after initialization.
+### `update_funding_target` (Admin-Only)
 
-### Tier Struct
+**Location:** `src/lib.rs::update_funding_target`
 
+**Callable in:** Status 0 (open) only.
+
+**Validation:**
 ```rust
-pub struct YieldTier {
-    pub min_lock_secs: u64,
-    pub yield_bps: i64,
+// Liability floor: target must remain >= funded_amount - distributed_principal.
+// In status 0 (open), distributed_principal is always 0, so this reduces to >= funded_amount.
+// This invariant aligns with the floor used by sweep_terminal_dust in cancelled (status 4) escrows.
+let distributed: i128 = env.storage().instance().get(&DataKey::DistributedPrincipal).unwrap_or(0);
+let liability_floor = escrow.funded_amount.saturating_sub(distributed);
+ensure(&env, new_target >= liability_floor, EscrowError::TargetBelowFundedAmount);
+```
+
+**Effect:** Prevents lowering the target below `funded_amount`, ensuring any future cancellation + refund cycle
+has sufficient balance to cover all outstanding claims.
+
+### `sweep_terminal_dust` (Treasury-Only)
+
+**Location:** `src/lib.rs::sweep_terminal_dust`
+
+**Callable in:** Status 2 (settled), 3 (withdrawn), 4 (cancelled), 5 (archived).
+
+**Validation (status 4 only):**
+```rust
+// Liability floor (cancelled escrows only): sweep must not reduce the balance below
+// principal still owed to investors who have not yet called refund().
+// outstanding = funded_amount - distributed_principal
+// Invariant: balance - sweep_amt >= outstanding
+if escrow.status == 4 {
+    let distributed: i128 = env.storage().instance().get(&DataKey::DistributedPrincipal).unwrap_or(0);
+    let outstanding = escrow.funded_amount.saturating_sub(distributed);
+    let balance_after_sweep = balance - sweep_amt;
+    ensure(&env, balance_after_sweep >= outstanding, EscrowError::SweepExceedsLiabilityFloor);
 }
 ```
 
-### Validation Rules (enforced at init)
-
-| Rule | Error Code | Recovery |
-|------|-----------|----------|
-| Tier `yield_bps` in `0..=10_000` | Code 10 | Correct yield BPS |
-| Tier `yield_bps >= base_yield` | Code 11 | Raise tier yield or lower base |
-| `min_lock_secs` strictly increasing | Code 12 | Sort tiers by `min_lock_secs` |
-| `yield_bps` non-decreasing across tiers | Code 13 | Ensure higher tiers have ≥ yield |
-
-### Example Configurations
-
-**Conservative (3-tier, moderate incentives):**
-```json
-{
-  "base_yield": 600,
-  "yield_tiers": [
-    { "min_lock_secs": 2592000,  "yield_bps": 700 },
-    { "min_lock_secs": 7776000,  "yield_bps": 850 },
-    { "min_lock_secs": 15552000, "yield_bps": 1000 }
-  ]
-}
-```
-
-**Aggressive (2-tier, steep incentive curve):**
-```json
-{
-  "base_yield": 800,
-  "yield_tiers": [
-    { "min_lock_secs": 2592000,  "yield_bps": 1000 },
-    { "min_lock_secs": 7776000,  "yield_bps": 1500 }
-  ]
-}
-```
-
-**Simple (no tiers, same yield for all):**
-```json
-{
-  "base_yield": 900,
-  "yield_tiers": null
-}
-```
+**Effect:** Prevents sweeping treasury dust in a way that would strand outstanding investor refund obligations.
 
 ---
 
-## Minimum Contribution Floor — Absence-Equals-Zero Semantics
+## Scenario: Partial Refund Then Dust Sweep
 
-The `MinContributionFloor` parameter guards against dust contributions and is **immutable** after initialization.
-
-### Key Properties
-
-| Property | Behavior |
-|----------|----------|
-| **Stored as** | `DataKey::MinContributionFloor` (instance storage) |
-| **Default** | When absent (not set at init or on older schema versions), the floor defaults to **0** |
-| **Validation** | If set, must be `> 0`. Zero floors are forbidden at init to avoid semantic ambiguity. |
-| **Mutability** | Not mutable after `init`. Floor is locked in for the escrow's lifetime. |
-| **Enforcement** | Applied to **every** `fund` and `fund_with_commitment` call: `amount >= floor` always. |
-
-### Absence-Equals-Zero Policy (Schema Compatibility)
-
-When reading `MinContributionFloor` during `fund`:
-
-```rust
-let floor: i128 = env.storage()
-    .instance()
-    .get(&DataKey::MinContributionFloor)
-    .unwrap_or(0);  // ← Absence (None) → 0
-```
-
-**Why this matters:**
-
-1. **On schema v2 and earlier:** `MinContributionFloor` key does not exist; read returns `None`, treated as floor = 0.
-2. **On schema v3+:** `MinContributionFloor` is always set (either to a positive value at init, or by default during migration).
-3. **Backward compatibility:** Upgrading from v2 → v3 and beyond: no migration needed. Old instances simply read floor as 0.
-
-### Zero-Amount Rejection (Independent of Floor)
-
-Zero amounts are **always** rejected with Code 100 (`FundingAmountNotPositive`), independent of floor:
-
-```rust
-ensure(&env, amount > 0, EscrowError::FundingAmountNotPositive);  // Always first
-ensure(&env, amount >= floor, EscrowError::FundingBelowMinContribution);  // Always second
-```
-
-This ensures:
-- No race condition between floor updates and concurrent fund calls
-- Zero amounts are never "sneaked through" via floor = 0
-- Explicit semantics: positive amounts are the baseline, floor is an additional guard
-
----
-
-## Error Codes Reference
-
-### Fund-Specific Errors
-
-| Code | Constant | Condition | Recovery |
-|------|----------|-----------|----------|
-| 100 | `FundingAmountNotPositive` | `amount <= 0` | Pass positive amount |
-| 101 | `FundingBelowMinContribution` | `amount < min_contribution_floor` | Increase deposit or contact operator |
-| 102 | `LegalHoldBlocksFunding` | Legal hold is active | Contact operator/governance |
-| 103 | `EscrowNotOpenForFunding` | Escrow status != 0 (Open) | Wait or redeploy escrow |
-| 104 | `InvestorNotAllowlisted` | Allowlist active, investor not on list | Contact operator |
-| 105 | `InvestorContributionOverflow` | Contribution arithmetic overflow (rare) | Split deposit or contact operator |
-| 106 | `InvestorContributionExceedsCap` | Total would exceed per-investor cap | Reduce amount or split over time |
-| 107 | `UniqueInvestorCapReached` | New investor but cap full | Contact operator or fund as existing investor |
-| 108 | **`TieredSecondDeposit`** | **`fund_with_commitment` called twice by same investor** | **Use `fund` for additional deposits, or deploy new escrow** |
-| 109 | `InvestorClaimTimeOverflow` | Lock timestamp arithmetic overflow (rare) | Use shorter lock period |
-| 110 | `FundedAmountOverflow` | Total funded amount overflow (rare) | Contact operator |
-| 111 | `CommitmentLockExceedsMaturity` | `claim_not_before > escrow.maturity` | Use shorter lock period |
-| 153 | `FundingDeadlinePassed` | Funding window closed | Redeploy escrow if still needed |
-| 165 | `DisputePausedBlocksFunding` | Dispute pause is active | Wait for dispute resolution |
-| 173 | `InvestorNotVerified` | KYC check failed | Complete KYC or contact operator |
-| 205 | `SanctionsScreeningFailed` | Sanctions provider rejects investor | Contact compliance team |
-
----
-
-## Storage Footprint & Limits
-
-Each investor is stored under a persistent key:
-
-```rust
-// Per-investor records (persistent storage, bounded per investor)
-DataKey::InvestorContribution(investor)               // i128
-DataKey::InvestorEffectiveYield(investor)            // i64
-DataKey::InvestorClaimNotBefore(investor)            // u64 (timestamp)
-DataKey::InvestorLockInUntil(investor)              // u64 (timestamp)
-DataKey::InvestorHistory(investor)                  // Vec of history records
-```
-
-### Practical Limits
-
-- **Supported investor cardinality:** Configured at init via `max_unique_investors` (no hard-coded global max)
-- **Per-investor history records:** Unbounded, but TTL and compaction policies may apply
-- **Escrow instance storage footprint:** Fixed ~5–10 KB per escrow (stable across investor count)
-
----
-
-## Workflow Examples
-
-### Example 1: Simple Base-Yield Deposit
+This scenario illustrates how the invariant protects investors:
 
 **Setup:**
-- Invoice: 100,000 USDC, base yield 8%, no tiers
+- Invoice target: 10,000 tokens
+- Investor A: 5,000 tokens
+- Investor B: 5,000 tokens
+- Balance: 10,000 tokens (all funded)
+- Escrow status: 4 (cancelled)
 
-**Action:**
-```typescript
-// Investor A deposits 50,000 USDC
-await client.fund(investorA, "50000000000");
-```
+**Step 1: Investor A refunds**
+- Call `refund(&investor_a)`
+  - `funded_amount = 10_000`
+  - `distributed_principal = 5_000`
+  - `outstanding = 10_000 - 5_000 = 5_000` ← Investor B still owed
+  - `balance = 10_000 - 5_000 = 5_000`
 
-**Result:**
-- Investor A's contribution: 50,000
-- Investor A's effective yield: 8% (base)
-- Escrow status: Open (50% of target reached)
-- Claim lock: None (eligible to claim immediately after settlement)
+**Step 2: Attempt to sweep excess dust**
+- Call `sweep_terminal_dust(1_000)` on treasury
+  - Dust sweep floor: `balance_after_sweep = 5_000 - 1_000 = 4_000`
+  - Outstanding: `5_000`
+  - Check: `4_000 >= 5_000`? **NO** → Reject with `SweepExceedsLiabilityFloor = 42`
+  - Treasury cannot sweep yet
 
-**Action:**
-```typescript
-// Investor A adds 30,000 more USDC
-await client.fund(investorA, "30000000000");
-```
+**Step 3: Investor B refunds**
+- Call `refund(&investor_b)`
+  - `funded_amount = 10_000`
+  - `distributed_principal = 10_000`
+  - `outstanding = 0` ← No liabilities remain
+  - `balance = 0`
 
-**Result:**
-- Investor A's contribution: 80,000 (stacked)
-- Effective yield unchanged: 8% (set on first call, reused)
-- Escrow status: Open (80% of target)
+**Step 4: Retry dust sweep**
+- Since `distributed_principal == funded_amount`, `outstanding = 0`
+- Sweep is now **allowed** (no constraints)
 
 ---
 
-### Example 2: Tiered Yield with Commitment Lock
+## Scenario: Pre-Cancellation Target Update
+
+This scenario shows why `update_funding_target` must respect the liability floor:
 
 **Setup:**
-- Invoice: 100,000 USDC, base yield 6%, 3-tier ladder:
-  - 30 days @ 8%
-  - 90 days @ 10%
-  - 180 days @ 12%
+- Invoice target: 10,000 tokens
+- Investor A: 3,000 tokens
+- Investor B: 2,000 tokens
+- `funded_amount = 5_000`
+- Balance: 5,000 tokens
+- Escrow status: 0 (open)
 
-**Action:**
-```typescript
-// Investor B commits 50,000 USDC for 90 days
-await client.fundWithCommitment(investorB, "50000000000", "7776000");
+**Attempt: Lower target below funded amount**
+```
+admin.update_funding_target(3_000)  // Try to set target to 3,000
 ```
 
-**Result:**
-- Investor B's contribution: 50,000
-- Effective yield: 10% (matched 90-day tier)
-- Claim lock: now + 90 days (UTC timestamp)
-- Escrow status: Open (50% funded)
+**Check:**
+- `liability_floor = funded_amount - distributed_principal = 5_000 - 0 = 5_000`
+- `new_target = 3_000`
+- Condition: `3_000 >= 5_000`? **NO** → Reject with `TargetBelowFundedAmount = 74`
 
-**Investor B tries a second deposit (FAILS):**
-```typescript
-await client.fund(investorB, "20000000000"); // Any call by same investor fails
-// Error: Code 36 (TieredSecondDeposit)
-```
-
-**Action:**
-```typescript
-// Investor C deposits 50,000 USDC with no lock commitment
-await client.fundWithCommitment(investorC, "50000000000", "0");
-```
-
-**Result:**
-- Investor C's contribution: 50,000
-- Effective yield: 6% (base, committed_lock_secs = 0 matches no tier)
-- Claim lock: None (0)
-- Escrow status: Funded (100% target met)
-- `FundingCloseSnapshot` created (immutable)
-
-**Settlement phase:**
-```typescript
-// SME settles after maturity window
-await client.settle(smeAddress);
-// Escrow transitions to Settled (status = 2)
-```
-
-**Investor B's claim (after 90-day lock expires):**
-```typescript
-// At settlement + 90 days, Investor B claims
-const payout = await client.claimInvestorPayout(investorB);
-// Receives: principal + 10% yield
-```
-
-**Investor C's claim (immediate):**
-```typescript
-// Investor C claims right away (no lock)
-const payout = await client.claimInvestorPayout(investorC);
-// Receives: principal + 6% yield
-```
+**Why reject?**
+- If we allowed this, the target becomes 3,000 but balance holds 5,000.
+- Later, if the escrow is cancelled, Investors A and B have claims for 5,000 total.
+- The balance (5,000) would be just enough to refund them.
+- But the target (3,000) would be misleading to future participants.
+- The invariant prevents this inconsistency.
 
 ---
 
-## Integration Checklist
+## Common Questions
 
-- [ ] Understand **first-deposit-only discipline** for `fund_with_commitment` — second calls will reject
-- [ ] If using tiers, review tier configuration at init; tiers are immutable
-- [ ] Verify investor can call `fund` for additional deposits (not `fund_with_commitment`)
-- [ ] Confirm tier thresholds match business incentives (e.g., 90-day commitment for 10% yield)
-- [ ] Handle Code 36 (`TieredSecondDeposit`) gracefully in SDK/UI — guide user to `fund` instead
-- [ ] Monitor `InvestorClaimNotBefore` timestamp; investor cannot claim until it passes
-- [ ] Test lock-expire scenario: settle escrow, wait for locks, then claim
-- [ ] Monitor `FundingClosedEvent` to confirm escrow transitions to Funded
-- [ ] If concentration caps are configured, test boundary conditions
-- [ ] Review [Escrow Error Codes](escrow-error-messages.md) for complete error handling
+### Q: Why does `update_funding_target` read `distributed_principal` if it's always 0 in status 0?
+
+**A:** For **documentation and consistency**. The check explicitly computes `liability_floor` the same way as `sweep_terminal_dust`, making the shared invariant visible in the code and future-proofing against refactoring. It also makes the intent clear: we are enforcing a **floor based on liabilities**, not just a business rule.
+
+### Q: Can an admin lower the target after cancellation?
+
+**A:** No. `update_funding_target` requires status 0 (open). Once the escrow is funded (status 1) or cancelled (status 4), the target becomes immutable. This is intentional: the target is a governance lever for the initial open period only.
+
+### Q: What if balance dips below `liability_floor` due to external loss (e.g., token accounting error)?
+
+**A:** The contract assumes the token contract is non-defective. If a token has a bug (e.g., silent loss), Soroban's balance checks would detect it at transfer time and reject the transaction. The escrow contract itself does not recompute balances; it relies on SEP-41 contract invariants.
+
+### Q: Can I set the target to exactly equal `funded_amount`?
+
+**A:** Yes. `update_funding_target(funded_amount)` is valid. The check is `new_target >= liability_floor`, not `>`.
+
+### Q: How does `sweep_terminal_dust` apply to settled (status 2) or withdrawn (status 3) escrows?
+
+**A:** The liability floor check **only applies to cancelled (status 4) escrows**. In settled or withdrawn states:
+- Disbursement is off-chain.
+- `distributed_principal` remains 0 (unused).
+- No on-chain refund mechanism exists.
+- Treasury can sweep any excess balance without constraints.
+
+This is by design: in settled/withdrawn cases, the SME (issuer) has already received the full amount,
+and dust is truly residual (rounding or yield distributions).
+
+### Q: Can a dust sweep strand investors if `distributed_principal` is not properly tracked?
+
+**A:** No. If a bug caused `distributed_principal` to be undercounted, the invariant would still protect investors:
+- The check would compute a **lower** `outstanding` than actual.
+- The check would **allow** a sweep that should have been blocked.
+- **However**, the token transfer would succeed only if balance actually existed.
+- Investors calling `refund()` would then fail at the token transfer step.
+
+To prevent this, the contract ensures `distributed_principal` is **incremented atomically** with each successful `refund()` transfer. The two are always in sync.
+
+---
+
+## Implementation Notes for Developers
+
+### Adding a New Endpoint that Affects Balance
+
+If adding a new endpoint that moves funds (e.g., a new refund variant):
+1. **Increment `distributed_principal` atomically** when principal leaves the contract.
+2. **Update the invariant check** in any endpoints that read the balance.
+3. **Add a test** that exercises partial distributions followed by sweep, verifying the floor holds.
+
+### Storage Keys
+
+- `DataKey::Escrow` — Contains `funded_amount`
+- `DataKey::DistributedPrincipal` — Tracks cumulative refunds (or 0 if not yet written)
+
+Both must be read together when computing `liability_floor`.
 
 ---
 
 ## Related Documents
 
-- [Escrow Init Parameters](escrow-init-parameters.md) — `yield_tiers`, `min_contribution`, caps
-- [Escrow Lifecycle & State Machine](escrow-lifecycle.md) — fund → settle → claim flow
-- [Escrow Error Codes](escrow-error-messages.md) — all typed error references
-- [ADR-005: Tiered Yield](adr/ADR-005-tiered-yield.md) — design rationale
-- [ADR-003: Settlement Flow](adr/ADR-003-settlement-flow.md) — two-phase settlement
-- [CLI Simulation Recipes](escrow-sim-stellar-cli.md) — test funding entrypoints locally
+- [Escrow Lifecycle & State Machine](escrow-lifecycle.md)
+- [Escrow Init Parameters](escrow-init-parameters.md)
+- [Escrow Error Messages](escrow-error-messages.md)
+- [Escrow Data Model](escrow-data-model.md)
+- [Escrow External Calls & Token Integrations](ESCROW_TOKEN_INTEGRATION_CHECKLIST.md)
+
+---
+
+## Audit Checklist
+
+When auditing the escrow contract, verify:
+
+- [ ] `update_funding_target` reads `distributed_principal` and computes `liability_floor` correctly.
+- [ ] `sweep_terminal_dust` (status 4 path) reads the same `distributed_principal` key.
+- [ ] Both endpoints reject with appropriate error codes (`TargetBelowFundedAmount = 74`, `SweepExceedsLiabilityFloor = 42`).
+- [ ] `refund()` increments `distributed_principal` atomically with token transfer.
+- [ ] No code path mutates `distributed_principal` except `refund()` and initialization (default 0).
+- [ ] Test coverage includes: partial refund → attempted sweep → blocked; then remaining refund → sweep allowed.
+- [ ] `liability_floor` computation uses `saturating_sub` to avoid underflow in edge cases.
