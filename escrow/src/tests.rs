@@ -69,6 +69,7 @@ mod properties_funding;
 mod read_only_invariant;
 mod secure_rng;
 mod settlement;
+mod settle_gas_benchmark;
 mod sharding_aggregate_benchmark;
 mod tier_base_yield;
 mod tokenomics;
