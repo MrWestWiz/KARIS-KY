@@ -393,6 +393,49 @@ When `maturity > 0`:
 
 `withdraw()` does **not** check maturity; it is a pull model for SME liquidity.
 
+### Ledger-Timestamp Basis (Critical for Operators)
+
+**All maturity checks are strictly against the validator-observed ledger timestamp** (`env.ledger().timestamp()`), 
+not wall-clock time or any off-chain clock. This is **the single source of truth** for settlement eligibility:
+
+```rust
+// In settle_impl:
+let now = env.ledger().timestamp();  // ← Validator-observed timestamp (UTC seconds)
+if escrow.maturity > 0 {
+    if now < escrow.maturity {
+        fail(..., EscrowError::MaturityNotReached);  // Code 122
+    }
+}
+```
+
+#### Boundary Behavior
+
+**Maturity timestamp is _inclusive_:**
+- `ledger_timestamp == maturity` → Settlement **succeeds** ✓
+- `ledger_timestamp == maturity - 1` → Settlement **fails** with error code 122 ✗
+
+**Tests confirming boundary:**
+- `settle_one_second_before_maturity_traps_and_preserves_state()` — confirms rejection before boundary
+- `settle_at_maturity_succeeds()` — confirms success at exact timestamp
+- `settle_one_second_after_maturity_succeeds()` — confirms success after boundary
+
+#### Implications for Operators
+
+1. **Off-chain tooling must use the same ledger timestamp**, not local system clocks
+2. When comparing on-chain maturity to external systems (indexers, dashboards, monitoring), 
+   use the **Stellar ledger timestamp**, not UTC wall-clock
+3. Clock skew across systems can cause confusion; always refer to the escrow contract's 
+   `env.ledger().timestamp()` as the authoritative source
+4. The maturity timestamp is set at initialization and is **immutable** (admin-only extensions 
+   require explicit timelock and guardian confirmation via `propose_maturity_extension` / `confirm_maturity_extension`)
+
+#### `partial_settle` Maturity Behavior
+
+The maturity gate also applies to partial settlements:
+- `partial_settle(amount)` with `maturity > 0` enforces `env.ledger().timestamp() >= escrow.maturity`
+- Once maturity is reached, **all further settlements** (full or partial) succeed without time gates
+- Partial settlements do **not** reset or modify the maturity timestamp
+
 ---
 
 ## Maturity extension guard (`update_ma

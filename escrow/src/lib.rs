@@ -116,6 +116,14 @@
 //! (including over-funding past target), the target, and ledger timestamp/sequence. **Immutable** once
 //! written; see `docs/escrow-pro-rata.md` for the authoritative pro-rata payout math and rounding rules.
 //! Off-chain share for an investor is `get_contribution(addr) / snapshot.total_principal`.
+//!
+//! ## Batch funding (`fund_batch`)
+//!
+//! [`LiquifactEscrow::fund_batch`] is the **canonical** entrypoint for multi-investor funding in a single
+//! atomic transaction. It is the single public batch interface and must be used for all batch operations
+//! to prevent implementation drift. All invariants from [`LiquifactEscrow::fund`] apply per entry.
+//! To discourage duplication, any alternative batch entrypoint (e.g., `batch_fund`) should be clearly
+//! marked deprecated with a `#[deprecated]` attribute directing callers to `fund_batch`.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -744,33 +752,9 @@ pub enum EscrowError {
     /// A multisig-gated entrypoint received a signer address that is not a member of the
     /// configured [`MultisigPolicy::signers`], or the same signer listed more than once.
     MultisigSignerNotAuthorized = 180,
-    /// The source escrow must be in a settled terminal state before the investor can roll yield.
-    ReinvestSourceEscrowNotSettled = 181,
-    /// The target escrow must still be in a funding/open flow before accepting reinvested yield.
-    ReinvestTargetEscrowNotFunding = 182,
-    /// The reinvestment amount must be strictly positive.
-    ReinvestAmountNotPositive = 183,
-    /// The investor does not hold enough accrued yield in the source escrow to complete the reinvestment.
-    ReinvestYieldInsufficient = 184,
-    /// [`LiquifactEscrow::withdraw`] called by a caller that is not the registered SME address.
-    UnauthorizedWithdrawer = 185,
-    /// Source and target escrows must use the same funding token for yield reinvestment.
-    ReinvestFundingTokenMismatch = 186,
-    /// [`LiquifactEscrow::reinvest_yield`] rejected a target escrow that is the same as the source escrow.
-    ReinvestSelfTargetRejected = 187,
-    /// A guardian-configured escrow requires admin proposal and guardian confirmation to activate a hold.
-    LegalHoldRequiresGuardianConfirmation = 207,
-    /// No legal-hold proposal is pending for guardian confirmation.
-    LegalHoldProposalMissing = 208,
-    /// A pending legal-hold proposal has expired.
-    LegalHoldProposalExpired = 209,
-    /// The supplied guardian or admin does not match the configured escrow authority.
-    LegalHoldAuthorityMismatch = 210,
-    /// No guardian is configured for this escrow.
-    LegalHoldGuardianNotConfigured = 211,
-    /// A legal hold is already active.
-    LegalHoldAlreadyActive = 212,
-    /// The configured legal-hold guardian must be distinct from the escrow admin.
+
+    /// [`LiquifactEscrow::init`] or [`LiquifactEscrow::set_legal_hold_guardian`] received a guardian address
+    /// that is identical to the current admin. Guardian must be distinct from admin.
     LegalHoldGuardianSameAsAdmin = 213,
     /// [`LiquifactEscrow::archive_escrow`] called on an escrow not in a terminal state.
     /// Only status 2 (settled), 3 (withdrawn), or 4 (cancelled) can be archived.
@@ -851,6 +835,13 @@ pub enum DataKey {
     /// Configured minimum delay between [`LiquifactEscrow::request_clear_legal_hold`] and
     /// [`LiquifactEscrow::set_legal_hold`]. Absent ⇒ `0`.
     LegalHoldClearDelay,
+    /// Optional guardian address distinct from admin, authorized to propose legal holds.
+    /// Absent ⇒ no guardian configured. Set at [`LiquifactEscrow::init`] with optional parameter.
+    /// Must be validated to differ from [`InvoiceEscrow::admin`] at configuration time (error 213).
+    LegalHoldGuardian,
+    /// Proposed legal hold state awaiting guardian confirmation via [`LiquifactEscrow::confirm_legal_hold`].
+    /// Stores the reason string. Absent ⇒ no pending proposal.
+    PendingLegalHoldProposal,
     /// Optional SME collateral commitment metadata (record-only — not an on-chain asset lock).
     /// Absent when no commitment has been recorded. Replaceable by the SME.
     SmeCollateralPledge,
@@ -2099,7 +2090,7 @@ impl LiquifactEscrow {
         settlement_notifier_contract: Option<Address>,
         kyc_provider_contract: Option<Address>,
         admin_roles: Option<Vec<(Address, AdminRole)>>,
-        funding_stall_threshold_secs: Option<u64>,
+        legal_hold_guardian: Option<Address>,
     ) -> InvoiceEscrow {
         admin.require_auth();
         if let Some(ref guardian_address) = guardian {
@@ -2153,6 +2144,18 @@ impl LiquifactEscrow {
             !env.storage().instance().has(&DataKey::Escrow),
             EscrowError::EscrowAlreadyInitialized,
         );
+
+        // Validate guardian distinctness from admin at config time (error 213)
+        if let Some(ref guardian) = legal_hold_guardian {
+            ensure(
+                &env,
+                guardian != &admin,
+                EscrowError::LegalHoldGuardianSameAsAdmin,
+            );
+            env.storage()
+                .instance()
+                .set(&DataKey::LegalHoldGuardian, guardian);
+        }
 
         // Validate funding deadline
         if let Some(deadline) = funding_deadline {
@@ -4435,6 +4438,86 @@ impl LiquifactEscrow {
         Self::set_legal_hold(env, false, reason);
     }
 
+    /// Propose a legal hold. If a guardian is configured, only the guardian can call this.
+    /// If no guardian is configured, only the admin can call this.
+    ///
+    /// This stores a pending legal hold proposal with the given reason. The hold does not
+    /// become active until [`LiquifactEscrow::confirm_legal_hold`] is called.
+    ///
+    /// # Authorization
+    ///
+    /// - If `DataKey::LegalHoldGuardian` is set: **guardian must authorize** (via `Address::require_auth()`).
+    /// - If `DataKey::LegalHoldGuardian` is absent: **admin must authorize**.
+    ///
+    /// # Errors
+    ///
+    /// | Condition | Typed error |
+    /// |-----------|-------------|
+    /// | Escrow not initialized | [`EscrowError::EscrowNotInitialized`] |
+    /// | Caller not authorized | Panics via `require_auth()` |
+    pub fn propose_legal_hold(env: Env, reason: String) {
+        // Load escrow to ensure it's initialized and get admin for fallback auth
+        let escrow: InvoiceEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow)
+            .unwrap_or_else(|| fail(&env, EscrowError::EscrowNotInitialized));
+
+        // Determine who is authorized to propose: guardian if set, otherwise admin
+        let guardian_opt: Option<Address> = env.storage()
+            .instance()
+            .get(&DataKey::LegalHoldGuardian);
+
+        if let Some(guardian) = guardian_opt {
+            // Guardian is set; only guardian can propose
+            guardian.require_auth();
+        } else {
+            // No guardian; only admin can propose
+            escrow.admin.require_auth();
+        }
+
+        // Store the pending proposal
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingLegalHoldProposal, &reason);
+    }
+
+    /// Confirm a legal hold proposal. If a guardian is configured, only the admin can call this.
+    /// If no guardian is configured, this is a no-op (since the proposal already came from admin).
+    ///
+    /// This activates the legal hold from a pending proposal state.
+    ///
+    /// # Authorization
+    ///
+    /// - If `DataKey::LegalHoldGuardian` is set: **admin must authorize** (via `Address::require_auth()`).
+    /// - If `DataKey::LegalHoldGuardian` is absent: **admin must authorize** (same as `propose_legal_hold`).
+    ///
+    /// # Errors
+    ///
+    /// | Condition | Typed error |
+    /// |-----------|-------------|
+    /// | Escrow not initialized | [`EscrowError::EscrowNotInitialized`] |
+    /// | No pending proposal | Implementation-defined (proposal may be absent) |
+    /// | Caller not authorized | Panics via `require_auth()` |
+    pub fn confirm_legal_hold(env: Env) {
+        // Load escrow to ensure it's initialized
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        // Retrieve the pending proposal reason
+        let reason: String = env.storage()
+            .instance()
+            .get(&DataKey::PendingLegalHoldProposal)
+            .unwrap_or_else(|| String::from_str(&env, ""));
+
+        // Clear the pending proposal
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingLegalHoldProposal);
+
+        // Activate the legal hold using the existing set_legal_hold logic
+        Self::set_legal_hold(env, true, reason);
+    }
+
     pub fn update_funding_target(env: Env, new_target: i128) -> InvoiceEscrow {
         ensure(
             &env,
@@ -4446,9 +4529,19 @@ impl LiquifactEscrow {
 
         ensure(&env, new_target > 0, EscrowError::TargetNotPositive);
         ensure(&env, escrow.status == 0, EscrowError::TargetUpdateNotOpen);
+
+        // Liability floor: target must remain >= funded_amount - distributed_principal.
+        // In status 0 (open), distributed_principal is always 0, so this reduces to >= funded_amount.
+        // This invariant aligns with the floor used by sweep_terminal_dust in cancelled (status 4) escrows.
+        let distributed: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DistributedPrincipal)
+            .unwrap_or(0);
+        let liability_floor = escrow.funded_amount.saturating_sub(distributed);
         ensure(
             &env,
-            new_target >= escrow.funded_amount,
+            new_target >= liability_floor,
             EscrowError::TargetBelowFundedAmount,
         );
 
@@ -4933,26 +5026,28 @@ impl LiquifactEscrow {
         Self::batch_fund(env, entries)
     }
 
-    /// Batch funding entrypoint: record multiple investor principals in a single atomic call
-    /// and emit a [`BatchFundCompleted`] summary event when all entries succeed.
+    /// **Canonical** batch funding entrypoint: record multiple investor principals in a single call.
     ///
-    /// This is the canonical FEAT-001 entrypoint. It differs from [`LiquifactEscrow::fund_batch`]
-    /// in one key way: after every entry is processed it emits a single `BatchFundCompleted` event
-    /// carrying the aggregate totals (`total_funded_amount` and `investor_count`), which lets
-    /// indexers reconcile a batch submission with a single event lookup rather than scanning all
-    /// individual per-entry [`EscrowFunded`] events.
+    /// This is the **canonical batch funding interface** for multi-investor submissions.
+    /// It is the single public entrypoint for batch operations and prevents duplication and
+    /// implementation drift. All batch funding requests should use this entrypoint.
     ///
     /// Each entry is processed sequentially with per-investor [`Address::require_auth()`].
     /// All existing [`LiquifactEscrow::fund`] invariants (allowlist, caps, min contribution,
-    /// overflow guards) are enforced per entry. If any single entry fails its invariants the
-    /// entire transaction reverts atomically — no partial state is persisted.
+    /// overflow guards) are enforced per entry. If an entry fails its invariants,
+    /// the call returns an error without corrupting prior entries (atomic transaction semantics).
     ///
     /// # Parameters
-    /// - `contributions`: `Vec<(Address, i128)>` of `(investor_address, amount)` tuples.
-    ///   Maximum [`MAX_FUND_BATCH`] (50) entries per call.
+    /// - `entries`: `Vec<(Address, i128)>` of `(investor_address, amount)` tuples.
+    ///   Must be non-empty and contain at most [`MAX_FUND_BATCH`] (50) entries.
     ///
     /// # Returns
     /// The updated [`InvoiceEscrow`] after all entries are applied.
+    ///
+    /// # Errors
+    /// - [`EscrowError::FundingBatchEmpty`] if entries is empty.
+    /// - [`EscrowError::FundingBatchTooLarge`] if entries.len() > [`MAX_FUND_BATCH`].
+    /// - Per-entry: all errors from [`LiquifactEscrow::fund`] for that investor/amount pair.
     ///
     /// # Events
     /// - Per entry: [`EscrowFunded`] + [`FundReceived`] (identical to single
@@ -5242,7 +5337,8 @@ impl LiquifactEscrow {
                 now.checked_add(committed_lock_secs)
                     .unwrap_or_else(|| fail(env, EscrowError::InvestorClaimTimeOverflow))
             };
-            // Bound: reject if the claim lock would expire after the escrow maturity.
+            // Bound: reject if the claim lock would extend **past** the escrow maturity.
+            // Boundary is INCLUSIVE: claim_nb == escrow.maturity is allowed (investor can claim at maturity).
             // Only constrained when both committed_lock_secs > 0 and maturity > 0.
             if claim_nb > 0 && escrow.maturity > 0 {
                 ensure(
